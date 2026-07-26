@@ -4284,17 +4284,38 @@ function applyOcrBatchImport() {
 const ENABLE_QUAKE_HARDEN_LINK_BUG = false;
 // 実機確認済み: 封印中は攻撃スキルとすべての防御スキルを発動しない。
 const SKILL_SEAL_BLOCKS_DEFENSE_SKILLS = true;
+const SpeedModifierType = Object.freeze({
+  WARCRY: 'warcry',
+  ATTACK_SKILL: 'attack_skill',
+  PASSIVE: 'passive',
+  EQUIPMENT: 'equipment',
+  STATUS: 'status',
+});
+const ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE = true;
+const DEFAULT_ACTION_GAUGE_SPEED_MODIFIER_ENABLED = Object.freeze({
+  [SpeedModifierType.WARCRY]: true,
+  [SpeedModifierType.ATTACK_SKILL]: ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE,
+  [SpeedModifierType.PASSIVE]: true,
+  [SpeedModifierType.EQUIPMENT]: true,
+  [SpeedModifierType.STATUS]: true,
+});
 
 class Fighter {
-  constructor(data, instanceId = null) {
+  constructor(data, instanceId = null, actionGaugeSpeedModifierEnabled = {}) {
     this.data = data;
     this.instanceId = instanceId;
     this.name = data.name;
     this.maxHP = data.dur * 4;
     this.hp = (data.hp_start != null && data.hp_start > 0) ? Math.min(data.hp_start, this.maxHP) : this.maxHP;
     this.baseATK = data.atk;
-    this.agi = data.agi;
+    this.baseAGI = data.agi;
     this.will = data.will;
+    this.speedModifiers = [];
+    this.actionGaugeSpeedModifierEnabled = {
+      ...DEFAULT_ACTION_GAUGE_SPEED_MODIFIER_ENABLED,
+      ...actionGaugeSpeedModifierEnabled,
+      [SpeedModifierType.WARCRY]: true,
+    };
     this.atkRage = 0;   // 攻撃レイジ（自分が攻撃するたびに溜まる）
     this.defRage = 0;   // 防御レイジ（被弾するたびに溜まる）
     this.maxRage = 100;
@@ -4364,14 +4385,26 @@ class Fighter {
     }
     if (bc.effect === 'rapid') {
       const speedUp = getParam(this.data, 'rapid', 'param', bc.param || 0.03);
-      this.agi = Math.max(1, Math.round(this.agi * (1 + speedUp)));
+      this.addSpeedModifier({
+        id: 'warcry-rapid',
+        type: SpeedModifierType.WARCRY,
+        operation: 'multiply',
+        value: 1 + speedUp,
+        rounding: 'Math.round',
+      });
       this.rapidAtkPenalty = getParam(this.data, 'rapid', 'param2', bc.param2 || 0.02);
     }
     if (bc.effect === 'god_power') {
       const atkUp = getParam(this.data, 'god_power', 'param', bc.param || 0.12);
       const speedDown = getParam(this.data, 'god_power', 'param2', bc.param2 || 0.08);
       this.entryAtkBonus = (this.entryAtkBonus || 0) + atkUp;
-      this.agi = Math.max(1, Math.round(this.agi * (1 - speedDown)));
+      this.addSpeedModifier({
+        id: 'warcry-god-power',
+        type: SpeedModifierType.WARCRY,
+        operation: 'multiply',
+        value: 1 - speedDown,
+        rounding: 'Math.round',
+      });
     }
     // torment は applyEntryBattleCries() で両者に適用するためここでは処理しない
     // waver は動的に処理
@@ -4421,9 +4454,50 @@ class Fighter {
     return Math.max(1, Math.round(this.baseATK * mult) - (this.poisonStacks || 0));
   }
 
-  getAGI() {
-    const slowAgiDown = this.slowEffects.reduce((sum, effect) => sum + effect.agiDown, 0);
-    return Math.max(1, this.agi - slowAgiDown - (this.poisonStacks || 0));
+  addSpeedModifier(modifier) {
+    this.speedModifiers.push({ ...modifier });
+  }
+
+  getSpeedModifiers() {
+    const modifiers = [...this.speedModifiers];
+    this.slowEffects.forEach(effect => {
+      modifiers.push({
+        id: effect.id,
+        type: SpeedModifierType.ATTACK_SKILL,
+        operation: 'subtract',
+        value: effect.agiDown,
+      });
+    });
+    if (this.poisonStacks > 0) {
+      modifiers.push({
+        id: 'status-poison',
+        type: SpeedModifierType.STATUS,
+        operation: 'subtract',
+        value: this.poisonStacks,
+      });
+    }
+    return modifiers;
+  }
+
+  calculateAGI(enabledTypes = null) {
+    let value = this.baseAGI;
+    this.getSpeedModifiers().forEach(modifier => {
+      if (enabledTypes && enabledTypes[modifier.type] === false) return;
+      if (modifier.operation === 'multiply') value *= modifier.value;
+      else if (modifier.operation === 'add') value += modifier.value;
+      else if (modifier.operation === 'subtract') value -= modifier.value;
+      else if (modifier.operation === 'set') value = modifier.value;
+      if (modifier.rounding === 'Math.round') value = Math.round(value);
+    });
+    return Math.max(1, value);
+  }
+
+  getDisplayAGI() {
+    return this.calculateAGI();
+  }
+
+  getActionGaugeAGI() {
+    return this.calculateAGI(this.actionGaugeSpeedModifierEnabled);
   }
 
   getActiveAttackSkill() {
@@ -4447,8 +4521,16 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
   const validB = teamDataB.filter(Boolean);
   if (!validA.length || !validB.length) return null;
 
-  const teamA = validA.map((d, index) => new Fighter(d, `A-${index}`));
-  const teamB = validB.map((d, index) => new Fighter(d, `B-${index}`));
+  const actionGaugeSpeedModifierEnabled = {
+    ...DEFAULT_ACTION_GAUGE_SPEED_MODIFIER_ENABLED,
+    ...(options?.actionGaugeSpeedModifierEnabled || {}),
+    [SpeedModifierType.ATTACK_SKILL]: options?.attackSkillSpeedAffectsActionGauge ??
+      options?.actionGaugeSpeedModifierEnabled?.[SpeedModifierType.ATTACK_SKILL] ??
+      ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE,
+    [SpeedModifierType.WARCRY]: true,
+  };
+  const teamA = validA.map((d, index) => new Fighter(d, `A-${index}`, actionGaugeSpeedModifierEnabled));
+  const teamB = validB.map((d, index) => new Fighter(d, `B-${index}`, actionGaugeSpeedModifierEnabled));
 
   const log = [];
   const push = (cls, msg) => { if (verbose) log.push({ cls, msg }); };
@@ -4486,7 +4568,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     attackRage: fighter.atkRage,
     defenseRage: fighter.defRage,
     atk: fighter.getATK(),
-    agi: fighter.getAGI(),
+    agi: fighter.getDisplayAGI(),
+    actionGaugeAgi: fighter.getActionGaugeAGI(),
     poisonStacks: fighter.poisonStacks || 0,
     statuses: {
       weakAtkTurns: fighter.weakAtkTurns || 0,
@@ -5236,7 +5319,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         : targetEffectsBefore.length
           ? targetEffectsBefore
           : attackerOwnEffects;
-      const oldEffectiveAgi = target.getAGI();
+      const oldDisplayAgi = target.getDisplayAGI();
+      const oldEffectiveAgi = target.getActionGaugeAGI();
       const debug = {
         slowSourceInstanceId: matchingEffects[0]?.sourceInstanceId ?? targetEffectsBefore[0]?.sourceInstanceId ?? attackerOwnEffects[0]?.sourceInstanceId ?? null,
         slowTargetInstanceId: matchingEffects[0]?.targetInstanceId ?? targetEffectsBefore[0]?.targetInstanceId ?? attackerOwnEffects[0]?.targetInstanceId ?? null,
@@ -5269,7 +5353,10 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       debug.decrementReason = debug.removedEffectIds.length
         ? 'matching_source_target_attack_slow_effect_removed'
         : 'matching_source_target_attack';
-      const newEffectiveAgi = target.getAGI();
+      const newDisplayAgi = target.getDisplayAGI();
+      const newEffectiveAgi = target.getActionGaugeAGI();
+      debug.oldDisplayAgi = oldDisplayAgi;
+      debug.newDisplayAgi = newDisplayAgi;
       if (analysisEnabled) {
         Object.assign(debug, describePreservedActionProgress(target, oldEffectiveAgi, newEffectiveAgi));
       }
@@ -6184,8 +6271,9 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       } else if (atkSkill.effect === 'slow') {
         const slowRate = getParam(atk.data, 'slow', 'param', atkSkill.param || 0.12);
         const slowStateBefore = { actor: fighterState(atk), target: fighterState(def) };
-        const agiDown = Math.round(def.getAGI() * slowRate);
-        const agiBeforeSlow = def.getAGI();
+        const agiBeforeSlow = def.getDisplayAGI();
+        const actionGaugeAgiBeforeSlow = def.getActionGaugeAGI();
+        const agiDown = Math.round(agiBeforeSlow * slowRate);
         const slowEffectsBefore = def.slowEffects.map(effect => ({ ...effect }));
         const newSlowEffect = {
           id: `slow-${++slowEffectSequence}`,
@@ -6196,9 +6284,9 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         };
         def.slowEffects.push(newSlowEffect);
         const slowActionProgress = analysisEnabled
-          ? describePreservedActionProgress(def, agiBeforeSlow, def.getAGI())
+          ? describePreservedActionProgress(def, actionGaugeAgiBeforeSlow, def.getActionGaugeAGI())
           : null;
-        push('log-debuff', t('slowEffect', fighterName(def), agiDown, def.getAGI()));
+        push('log-debuff', t('slowEffect', fighterName(def), agiDown, def.getDisplayAGI()));
         recordAnalysis({
           eventType: 'status',
           attackType: 'skill',
@@ -6217,7 +6305,9 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               target: fighterRef(def),
               agiBefore: agiBeforeSlow,
               agiDown,
-              agiAfter: def.getAGI(),
+              agiAfter: def.getDisplayAGI(),
+              actionGaugeAgiBefore: actionGaugeAgiBeforeSlow,
+              actionGaugeAgiAfter: def.getActionGaugeAGI(),
               slowEffectId: newSlowEffect.id,
               slowSourceInstanceId: newSlowEffect.sourceInstanceId,
               slowTargetInstanceId: newSlowEffect.targetInstanceId,
@@ -6237,7 +6327,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
                 target: fighterRef(def),
                 before: agiBeforeSlow,
                 delta: -agiDown,
-                after: def.getAGI(),
+                after: def.getDisplayAGI(),
                 reason: 'skill_applied',
                 timing: 'skill_effect',
               },
@@ -6575,8 +6665,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     actionNo = action + 1;
     currentRandomLog = developerLog ? [] : null;
 
-    const timeToA = (CHARGE_MAX - chargeA) / a.getAGI();
-    const timeToB = (CHARGE_MAX - chargeB) / b.getAGI();
+    const timeToA = (CHARGE_MAX - chargeA) / a.getActionGaugeAGI();
+    const timeToB = (CHARGE_MAX - chargeB) / b.getActionGaugeAGI();
 
     let actor, defender, isActorA, timeAdv;
     if (timeToA < timeToB) {
@@ -6588,8 +6678,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     } else {
       timeAdv = timeToB; actor = b; defender = a; isActorA = false;
     }
-    chargeA += timeAdv * a.getAGI();
-    chargeB += timeAdv * b.getAGI();
+    chargeA += timeAdv * a.getActionGaugeAGI();
+    chargeB += timeAdv * b.getActionGaugeAGI();
     if (isActorA) chargeA = 0; else chargeB = 0;
     currentActionMeta = {
       actionNo,
@@ -6599,8 +6689,10 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       actorTeam: isActorA ? 'A' : 'B',
       timeToA,
       timeToB,
-      effectiveAgiA: a.getAGI(),
-      effectiveAgiB: b.getAGI(),
+      effectiveAgiA: a.getActionGaugeAGI(),
+      effectiveAgiB: b.getActionGaugeAGI(),
+      displayAgiA: a.getDisplayAGI(),
+      displayAgiB: b.getDisplayAGI(),
       chargeAfterAdvance: { A: chargeA, B: chargeB },
       randoms: currentRandomLog,
     };
@@ -6612,8 +6704,10 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       order: {
         timeToA,
         timeToB,
-        effectiveAgiA: a.getAGI(),
-        effectiveAgiB: b.getAGI(),
+        effectiveAgiA: a.getActionGaugeAGI(),
+        effectiveAgiB: b.getActionGaugeAGI(),
+        displayAgiA: a.getDisplayAGI(),
+        displayAgiB: b.getDisplayAGI(),
         actorTeam: isActorA ? 'A' : 'B',
         randoms: developerLog ? [...currentRandomLog] : undefined,
       },
@@ -6763,7 +6857,20 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     push('log-winner', t('teamWin', winningTeam === 'A' ? t('teamA') : t('teamB'), aliveA, aliveB));
   }
 
-  return { winningTeam, teamA, teamB, idxA, idxB, log, snapshots, kongMatchupHp, analysisMode, debugFullSnapshot, analysisEvents };
+  return {
+    winningTeam,
+    teamA,
+    teamB,
+    idxA,
+    idxB,
+    log,
+    snapshots,
+    kongMatchupHp,
+    analysisMode,
+    debugFullSnapshot,
+    actionGaugeSpeedModifierEnabled,
+    analysisEvents,
+  };
 }
 
 // ===== チームビルダー =====
