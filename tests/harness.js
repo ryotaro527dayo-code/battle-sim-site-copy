@@ -5,6 +5,7 @@ function makeFakeElement(id = '') {
   return {
     id,
     value: '',
+    checked: false,
     textContent: '',
     innerHTML: '',
     className: '',
@@ -68,6 +69,8 @@ return {
   applyOcrResultToSlot,
   simulateBattle6v6,
   withSeededRandom,
+  battleAnalysisOptions,
+  getTestElement: id => document.getElementById(id),
 };`
   )(
     document,

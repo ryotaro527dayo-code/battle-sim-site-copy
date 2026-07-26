@@ -17,9 +17,23 @@ function teams() {
   return { attacker, defender, benchA, benchB };
 }
 
+app.getTestElement('analysisModeSelect').value = 'developer';
+const snapshotToggle = app.getTestElement('debugFullSnapshotToggle');
+assert.strictEqual(snapshotToggle.checked, false, 'full snapshot checkbox must default to off');
+assert.deepStrictEqual(
+  app.battleAnalysisOptions(),
+  { analysisMode: 'developer', debugFullSnapshot: false },
+  'unchecked UI option must propagate debugFullSnapshot false'
+);
+
 const first = teams();
 const result = app.withSeededRandom(24681357, () =>
-  app.simulateBattle6v6([first.attacker, first.benchA], [first.defender, first.benchB], true, { analysisMode: 'developer' })
+  app.simulateBattle6v6(
+    [first.attacker, first.benchA],
+    [first.defender, first.benchB],
+    true,
+    app.battleAnalysisOptions()
+  )
 );
 
 const events = result.analysisEvents || [];
@@ -130,11 +144,19 @@ assert.strictEqual(
 });
 
 const second = teams();
+snapshotToggle.checked = true;
+assert.deepStrictEqual(
+  app.battleAnalysisOptions(),
+  { analysisMode: 'developer', debugFullSnapshot: true },
+  'checked UI option must propagate debugFullSnapshot true'
+);
 const resultWithSnapshots = app.withSeededRandom(24681357, () =>
-  app.simulateBattle6v6([second.attacker, second.benchA], [second.defender, second.benchB], true, {
-    analysisMode: 'developer',
-    debugFullSnapshot: true,
-  })
+  app.simulateBattle6v6(
+    [second.attacker, second.benchA],
+    [second.defender, second.benchB],
+    true,
+    app.battleAnalysisOptions()
+  )
 );
 const snapshotHit = (resultWithSnapshots.analysisEvents || []).find(event => event.eventType === 'hit');
 assert(snapshotHit?.stateBefore?.teams, 'full team snapshots should be included when debugFullSnapshot is true');
