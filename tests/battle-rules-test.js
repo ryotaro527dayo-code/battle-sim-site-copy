@@ -186,6 +186,151 @@ const app = loadBattleSim();
 }
 
 {
+  const slowSource = beast('test_slow_source_lifecycle', 'Slow Source Lifecycle', {
+    agi: 200, atk: 1, dur: 1000, will: 67,
+  }, [
+    { name: '攻撃-減速', type: 'attack', rageCost: 40, effect: 'slow', param: 0.50 },
+  ]);
+  const slowTarget = beast('test_slow_target_lifecycle', 'Slow Target Lifecycle', {
+    agi: 150, atk: 1, dur: 1000, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(2468, () =>
+    app.simulateBattle6v6([slowSource], [slowTarget], true, { analysisMode: 'developer' })
+  );
+  const slowApplied = result.analysisEvents.find(event =>
+    event.eventType === 'status' &&
+    event.skillId === 'slow' &&
+    event.target?.beastId === slowTarget.id
+  );
+
+  assert(slowApplied, 'slow lifecycle test must apply slow');
+  const sourceInstanceId = slowApplied.debugCalculation.status.slowSourceInstanceId;
+  const targetInstanceId = slowApplied.debugCalculation.status.slowTargetInstanceId;
+  assert.strictEqual(sourceInstanceId, slowApplied.actor.instanceId, 'slow must store the source instance ID');
+  assert.strictEqual(targetInstanceId, slowApplied.target.instanceId, 'slow must store the target instance ID');
+  assert.strictEqual(slowApplied.debugCalculation.status.attacksUntilRemovalAfter, 2, 'new slow must start at two matching attacks');
+
+  const targetOwnAction = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.actionNo > slowApplied.actionNo &&
+    event.actor?.instanceId === targetInstanceId &&
+    event.stateBefore?.actor?.statuses?.slowEffect?.attacksUntilRemoval === 2
+  );
+  assert(targetOwnAction, 'slowed target must receive an action while slow has two attacks remaining');
+  assert.strictEqual(
+    targetOwnAction.stateAfter.actor.statuses.slowEffect.attacksUntilRemoval,
+    2,
+    'slowed target own action must not decrement slow'
+  );
+  assert.strictEqual(
+    targetOwnAction.debugCalculation.slowDecrement.decrementReason,
+    'slowed_target_own_action_does_not_decrement',
+    'slowed target own action must log why the slow count was preserved'
+  );
+
+  const matchingSourceHits = result.analysisEvents.filter(event =>
+    event.eventType === 'hit' &&
+    event.actionNo > slowApplied.actionNo &&
+    event.actor?.instanceId === sourceInstanceId &&
+    event.target?.instanceId === targetInstanceId &&
+    event.debugCalculation?.slowDecrement?.decrementTriggered
+  );
+  assert(matchingSourceHits.length >= 2, 'slow source must attack the slow target twice after application');
+  assert.deepStrictEqual(
+    [
+      matchingSourceHits[0].debugCalculation.slowDecrement.attacksUntilRemovalBefore,
+      matchingSourceHits[0].debugCalculation.slowDecrement.attacksUntilRemovalAfter,
+    ],
+    [2, 1],
+    'first matching source attack must decrement slow from two to one'
+  );
+  assert.deepStrictEqual(
+    [
+      matchingSourceHits[1].debugCalculation.slowDecrement.attacksUntilRemovalBefore,
+      matchingSourceHits[1].debugCalculation.slowDecrement.attacksUntilRemovalAfter,
+    ],
+    [1, 0],
+    'second matching source attack must decrement slow from one to zero'
+  );
+  assert.strictEqual(
+    matchingSourceHits[1].stateAfter.target.statuses.slowEffect,
+    null,
+    'slow must be removed only when the matching attack count reaches zero'
+  );
+}
+
+{
+  const doomedSlowSource = beast('test_doomed_slow_source', 'Doomed Slow Source', {
+    agi: 301, atk: 1, dur: 25, will: 67,
+  }, [
+    { name: '攻撃-減速', type: 'attack', rageCost: 40, effect: 'slow', param: 0.50 },
+  ]);
+  const replacement = beast('test_slow_source_replacement', 'Slow Source Replacement', {
+    agi: 250, atk: 1, dur: 1000, will: 1,
+  }, []);
+  const persistentSlowTarget = beast('test_persistent_slow_target', 'Persistent Slow Target', {
+    agi: 100, atk: 500, dur: 5000, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(1357, () =>
+    app.simulateBattle6v6(
+      [doomedSlowSource, replacement],
+      [persistentSlowTarget],
+      true,
+      { analysisMode: 'developer' }
+    )
+  );
+  const slowApplied = result.analysisEvents.find(event =>
+    event.eventType === 'status' &&
+    event.skillId === 'slow' &&
+    event.actor?.beastId === doomedSlowSource.id
+  );
+  assert(slowApplied, 'doomed source must apply slow before being defeated');
+
+  const sourceInstanceId = slowApplied.actor.instanceId;
+  const targetInstanceId = slowApplied.target.instanceId;
+  const sourceDefeat = result.analysisEvents.find(event =>
+    event.eventType === 'defeat' &&
+    event.defeated?.instanceId === sourceInstanceId
+  );
+  assert(sourceDefeat, 'slow source must be defeated after applying slow');
+
+  const replacementHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.actionNo > sourceDefeat.actionNo &&
+    event.actor?.beastId === replacement.id &&
+    event.target?.instanceId === targetInstanceId
+  );
+  assert(replacementHit, 'replacement must attack the persistent slow target');
+  assert.strictEqual(
+    replacementHit.debugCalculation.slowDecrement.decrementTriggered,
+    false,
+    'replacement attack must not decrement slow applied by the defeated source'
+  );
+  assert.strictEqual(
+    replacementHit.debugCalculation.slowDecrement.decrementReason,
+    'attacker_not_slow_source',
+    'replacement mismatch must be explicit in the debug log'
+  );
+  assert.strictEqual(
+    replacementHit.debugCalculation.slowDecrement.attacksUntilRemovalBefore,
+    2,
+    'slow must remain at two after its source is defeated'
+  );
+  assert.strictEqual(
+    replacementHit.debugCalculation.slowDecrement.attacksUntilRemovalAfter,
+    2,
+    'replacement attack must leave persistent slow unchanged'
+  );
+  assert.strictEqual(
+    replacementHit.stateAfter.target.statuses.slowEffect.attacksUntilRemoval,
+    2,
+    'slow must remain on the target after a different instance attacks'
+  );
+}
+
+{
   const active = beast('test_entry_effective_agi_active', 'Entry Effective AGI Active', {
     agi: 120, atk: 500, dur: 1000, will: 1,
   }, []);
