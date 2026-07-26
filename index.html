@@ -6141,6 +6141,9 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         def.agi = Math.max(1, def.agi - agiDown);
         def.agiDebuffAttacksLeft = 2;
         def.agiDebuffAmount += agiDown;
+        const slowActionProgress = analysisEnabled
+          ? describePreservedActionProgress(def, agiBeforeSlow, def.getAGI())
+          : null;
         push('log-debuff', t('slowEffect', fighterName(def), agiDown, def.getAGI()));
         recordAnalysis({
           eventType: 'status',
@@ -6162,6 +6165,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               agiDown,
               agiAfter: def.getAGI(),
               remainingAttacks: def.agiDebuffAttacksLeft,
+              ...(slowActionProgress || {}),
             },
             statusChanges: [
               {
@@ -6420,6 +6424,30 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
   const CHARGE_MAX = 1000;
   const MAX_ACTIONS = 2000;
   let winningTeam = null;
+  const actionChargeFor = (fighter) => fighterSide(fighter) === 'A' ? chargeA : chargeB;
+  const describePreservedActionProgress = (fighter, oldEffectiveAgi, newEffectiveAgi) => {
+    const actionGauge = actionChargeFor(fighter);
+    const oldInterval = CHARGE_MAX / oldEffectiveAgi;
+    const oldRemainingTime = (CHARGE_MAX - actionGauge) / oldEffectiveAgi;
+    const progressRatio = 1 - oldRemainingTime / oldInterval;
+    const newInterval = CHARGE_MAX / newEffectiveAgi;
+    const newRemainingTime = newInterval * (1 - progressRatio);
+    return {
+      oldEffectiveAgi,
+      newEffectiveAgi,
+      oldInterval,
+      oldRemainingTime,
+      progressRatio,
+      newInterval,
+      newRemainingTime,
+      actionGauge,
+      actionProgressPreserved: true,
+    };
+  };
+  const resetActionProgressForMatchup = () => {
+    chargeA = 0;
+    chargeB = 0;
+  };
 
   const snapshots = [];
   const snap = () => snapshots.push({
@@ -6593,7 +6621,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       }
 
       // 交代処理: CTBリセット。通常攻撃なら交代直後でもレイジは増加する。
-      chargeA = 0; chargeB = 0;
+      resetActionProgressForMatchup();
       logNewMatchup();
       snap();
       continue;
@@ -6655,7 +6683,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       }
 
       // 反撃や反射で攻撃側が倒れた場合も、通常の交代と同じ扱いにする。
-      chargeA = 0; chargeB = 0;
+      resetActionProgressForMatchup();
       logNewMatchup();
       snap();
       continue;
