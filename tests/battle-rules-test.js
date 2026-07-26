@@ -209,18 +209,18 @@ const app = loadBattleSim();
   const targetInstanceId = slowApplied.debugCalculation.status.slowTargetInstanceId;
   assert.strictEqual(sourceInstanceId, slowApplied.actor.instanceId, 'slow must store the source instance ID');
   assert.strictEqual(targetInstanceId, slowApplied.target.instanceId, 'slow must store the target instance ID');
-  assert.strictEqual(slowApplied.debugCalculation.status.attacksUntilRemovalAfter, 2, 'new slow must start at two matching attacks');
+  assert.deepStrictEqual(slowApplied.debugCalculation.status.attacksUntilRemovalAfter, [2], 'new slow must start at two matching attacks');
 
   const targetOwnAction = result.analysisEvents.find(event =>
     event.eventType === 'hit' &&
     event.actionNo > slowApplied.actionNo &&
     event.actor?.instanceId === targetInstanceId &&
-    event.stateBefore?.actor?.statuses?.slowEffect?.attacksUntilRemoval === 2
+    event.stateBefore?.actor?.statuses?.slowEffects?.some(effect => effect.attacksUntilRemoval === 2)
   );
   assert(targetOwnAction, 'slowed target must receive an action while slow has two attacks remaining');
-  assert.strictEqual(
-    targetOwnAction.stateAfter.actor.statuses.slowEffect.attacksUntilRemoval,
-    2,
+  assert.deepStrictEqual(
+    targetOwnAction.stateAfter.actor.statuses.slowEffects.map(effect => effect.attacksUntilRemoval),
+    [2],
     'slowed target own action must not decrement slow'
   );
   assert.strictEqual(
@@ -242,7 +242,7 @@ const app = loadBattleSim();
       matchingSourceHits[0].debugCalculation.slowDecrement.attacksUntilRemovalBefore,
       matchingSourceHits[0].debugCalculation.slowDecrement.attacksUntilRemovalAfter,
     ],
-    [2, 1],
+    [[2], [1]],
     'first matching source attack must decrement slow from two to one'
   );
   assert.deepStrictEqual(
@@ -250,14 +250,107 @@ const app = loadBattleSim();
       matchingSourceHits[1].debugCalculation.slowDecrement.attacksUntilRemovalBefore,
       matchingSourceHits[1].debugCalculation.slowDecrement.attacksUntilRemovalAfter,
     ],
-    [1, 0],
+    [[1], [0]],
     'second matching source attack must decrement slow from one to zero'
   );
-  assert.strictEqual(
-    matchingSourceHits[1].stateAfter.target.statuses.slowEffect,
-    null,
+  assert.deepStrictEqual(
+    matchingSourceHits[1].stateAfter.target.statuses.slowEffects,
+    [],
     'slow must be removed only when the matching attack count reaches zero'
   );
+}
+
+{
+  const repeatedSlowSource = beast('test_repeated_slow_source', 'Repeated Slow Source', {
+    agi: 200, atk: 1, dur: 1000, will: 1,
+  }, [
+    { name: '攻撃-減速', type: 'attack', rageCost: 0, effect: 'slow', param: 0.10 },
+  ]);
+  const sealingTarget = beast('test_repeated_slow_target', 'Repeated Slow Target', {
+    agi: 100, atk: 1, dur: 1000, will: 1,
+  }, [
+    { name: '攻撃-虚弱', type: 'attack', rageCost: 0, effect: 'weak', param: 0.25, param2: 2 },
+  ]);
+
+  const result = app.withSeededRandom(9753, () =>
+    app.simulateBattle6v6([repeatedSlowSource], [sealingTarget], true, { analysisMode: 'developer' })
+  );
+  const slowApplications = result.analysisEvents.filter(event =>
+    event.eventType === 'status' &&
+    event.skillId === 'slow' &&
+    event.actor?.beastId === repeatedSlowSource.id
+  );
+  assert(slowApplications.length >= 2, 'source must apply two consecutive independent slow effects');
+  assert.deepStrictEqual(
+    slowApplications[0].stateAfter.target.statuses.slowEffects.map(effect => effect.attacksUntilRemoval),
+    [2],
+    'first slow attack must create one effect with count two'
+  );
+  assert.deepStrictEqual(
+    slowApplications[1].stateAfter.target.statuses.slowEffects.map(effect => effect.attacksUntilRemoval),
+    [1, 2],
+    'second slow attack must decrement the old effect and append a new count-two effect'
+  );
+  assert.notStrictEqual(
+    slowApplications[1].stateAfter.target.statuses.slowEffects[0].id,
+    slowApplications[1].stateAfter.target.statuses.slowEffects[1].id,
+    'overlapping slow effects must have independent IDs'
+  );
+
+  const postSecondApplicationHits = result.analysisEvents.filter(event =>
+    event.eventType === 'hit' &&
+    event.actionNo > slowApplications[1].actionNo &&
+    event.actor?.beastId === repeatedSlowSource.id &&
+    event.target?.beastId === sealingTarget.id &&
+    event.debugCalculation?.slowDecrement?.decrementTriggered
+  );
+  assert(postSecondApplicationHits.length >= 2, 'sealed source must make two normal attacks after the second slow');
+  assert.deepStrictEqual(
+    postSecondApplicationHits[0].debugCalculation.slowDecrement.attacksUntilRemovalBefore,
+    [1, 2],
+    'first normal attack must see both independent slow effects'
+  );
+  assert.deepStrictEqual(
+    postSecondApplicationHits[0].debugCalculation.slowDecrement.attacksUntilRemovalAfter,
+    [0, 1],
+    'first normal attack must decrement both matching effects independently'
+  );
+  assert.deepStrictEqual(
+    postSecondApplicationHits[0].stateAfter.target.statuses.slowEffects.map(effect => effect.attacksUntilRemoval),
+    [1],
+    'only the zero-count effect must be removed'
+  );
+  assert.deepStrictEqual(
+    postSecondApplicationHits[1].debugCalculation.slowDecrement.attacksUntilRemovalBefore,
+    [1],
+    'second normal attack must retain the remaining effect'
+  );
+  assert.deepStrictEqual(
+    postSecondApplicationHits[1].debugCalculation.slowDecrement.attacksUntilRemovalAfter,
+    [0],
+    'second normal attack must expire the final effect'
+  );
+  assert.deepStrictEqual(
+    postSecondApplicationHits[1].stateAfter.target.statuses.slowEffects,
+    [],
+    'all slow effects must be gone after their own counters reach zero'
+  );
+}
+
+{
+  const fighter = new app.Fighter(
+    beast('test_slow_agi_sum', 'Slow AGI Sum', { agi: 200, atk: 1, dur: 1000, will: 1 }, []),
+    'B-test'
+  );
+  fighter.slowEffects = [
+    { id: 'slow-a', sourceInstanceId: 'A-0', targetInstanceId: 'B-test', attacksUntilRemoval: 1, agiDown: 50 },
+    { id: 'slow-b', sourceInstanceId: 'A-0', targetInstanceId: 'B-test', attacksUntilRemoval: 2, agiDown: 50 },
+  ];
+  assert.strictEqual(fighter.getAGI(), 100, 'two active 50-point slow effects must reduce AGI by 100');
+  fighter.slowEffects = fighter.slowEffects.filter(effect => effect.id !== 'slow-a');
+  assert.strictEqual(fighter.getAGI(), 150, 'removing one effect must restore only its own 50 AGI');
+  fighter.slowEffects = [];
+  assert.strictEqual(fighter.getAGI(), 200, 'removing all effects must restore original AGI');
 }
 
 {
@@ -314,17 +407,17 @@ const app = loadBattleSim();
     'replacement mismatch must be explicit in the debug log'
   );
   assert.strictEqual(
-    replacementHit.debugCalculation.slowDecrement.attacksUntilRemovalBefore,
+    replacementHit.debugCalculation.slowDecrement.attacksUntilRemovalBefore[0],
     2,
     'slow must remain at two after its source is defeated'
   );
   assert.strictEqual(
-    replacementHit.debugCalculation.slowDecrement.attacksUntilRemovalAfter,
+    replacementHit.debugCalculation.slowDecrement.attacksUntilRemovalAfter[0],
     2,
     'replacement attack must leave persistent slow unchanged'
   );
   assert.strictEqual(
-    replacementHit.stateAfter.target.statuses.slowEffect.attacksUntilRemoval,
+    replacementHit.stateAfter.target.statuses.slowEffects[0].attacksUntilRemoval,
     2,
     'slow must remain on the target after a different instance attacks'
   );

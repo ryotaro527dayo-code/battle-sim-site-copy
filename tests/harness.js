@@ -57,6 +57,7 @@ function loadBattleSim() {
     `${inlineScript}
 return {
   CHARS,
+  Fighter,
   TEAM_SEL,
   SLOT_STAT,
   OCR_CHAR_IDS,
