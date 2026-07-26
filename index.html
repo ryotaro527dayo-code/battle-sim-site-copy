@@ -4282,10 +4282,8 @@ function applyOcrBatchImport() {
 
 // ===== バトルステート =====
 const ENABLE_QUAKE_HARDEN_LINK_BUG = false;
-// TODO:
-// 封印中の防御レイジスキルの発動可否は未検証。
-// 検証結果が判明したら仕様を更新する。
-const SEAL_BLOCKS_DEFENSE_RAGE_SKILLS = true;
+// 実機確認済み: 封印中は攻撃スキルとすべての防御スキルを発動しない。
+const SKILL_SEAL_BLOCKS_DEFENSE_SKILLS = true;
 
 class Fighter {
   constructor(data) {
@@ -5104,18 +5102,22 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         checks: [
           { condition: 'has_defense_skill', passed: !!candidateDefenseSkill },
           { condition: 'defense_rage_at_least_cost', passed: candidateDefenseSkill ? rageBefore >= requiredRage : false, actual: rageBefore, required: requiredRage },
-          { condition: 'not_sealed_provisional', passed: !options.skillSealActive, actual: !!options.skillSealActive },
+          { condition: 'not_sealed', passed: !options.skillSealActive, actual: !!options.skillSealActive },
           { condition: 'not_multi_hit_skipped', passed: options.reason !== 'multi_hit_defense_check_skipped', actual: options.reason || null },
           { condition: 'not_entry_first_normal_suppressed', passed: options.reason !== 'entry_first_normal_defense_suppressed', actual: options.reason || null },
         ],
         result: availableDefenseSkill && !options.skillSealActive ? 'defense_skill' : 'not_triggered',
       },
     };
-    if (SEAL_BLOCKS_DEFENSE_RAGE_SKILLS && options.skillSealActive) {
+    if (options.skillSealActive) {
       return {
         ...baseInfo,
+        check: {
+          ...baseInfo.check,
+          reason: 'sealed',
+        },
         triggered: false,
-        reason: 'skill_sealed_defense_provisional',
+        reason: 'sealed',
         rageAfter: def.defRage,
       };
     }
@@ -5358,7 +5360,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     } else {
       mainDefenseInfo = {
         triggered: false,
-        reason: 'entry_first_normal_defense_suppressed',
+        reason: defenderSealActiveForDefense ? 'sealed' : 'entry_first_normal_defense_suppressed',
         sealed: defenderSealActiveForDefense,
         hitIndex: 1,
         rageBefore: def.defRage,
@@ -5840,7 +5842,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             checks: [
               { condition: 'has_defense_skill', passed: comboTarget.data.skills.some(s => s.type === 'defense') },
               { condition: 'defense_rage_at_least_cost', passed: false, actual: comboTarget.defRage, required: null },
-              { condition: 'not_sealed_provisional', passed: comboTarget.skillSealTurns <= 0, actual: comboTarget.skillSealTurns > 0 },
+              { condition: 'not_sealed', passed: comboTarget.skillSealTurns <= 0, actual: comboTarget.skillSealTurns > 0 },
               { condition: 'not_multi_hit_skipped', passed: false, actual: 'multi_hit_defense_check_skipped' },
               { condition: 'not_entry_first_normal_suppressed', passed: true, actual: null },
             ],
@@ -6220,8 +6222,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               weakAtkTurnsAfter: def.weakAtkTurns,
               skillSealTurnsBefore: weakBefore.skillSealTurns,
               skillSealTurnsAfter: def.skillSealTurns,
-              sealedSkillType: 'attack_skill',
-              defenseRageSkillBlockedProvisional: SEAL_BLOCKS_DEFENSE_RAGE_SKILLS,
+              sealedSkillTypes: ['attack_skill', 'defense_skill'],
+              defenseSkillsBlocked: SKILL_SEAL_BLOCKS_DEFENSE_SKILLS,
             },
             statusChanges: [
               {
@@ -6245,7 +6247,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
                 after: def.skillSealTurns,
                 reason: 'skill_applied',
                 timing: 'skill_effect',
-                sealedSkillType: 'attack_skill',
+                sealedSkillTypes: ['attack_skill', 'defense_skill'],
               },
             ],
           }),
