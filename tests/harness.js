@@ -63,6 +63,7 @@ return {
   getUniqueOcrCharIds,
   buildOcrCharOptions,
   defaultSkillLevels,
+  calcNormalRageGain,
   applyOcrResultToSlot,
   simulateBattle6v6,
   withSeededRandom,
