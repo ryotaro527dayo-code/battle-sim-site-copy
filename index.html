@@ -4274,6 +4274,10 @@ function applyOcrBatchImport() {
 
 // ===== バトルステート =====
 const ENABLE_QUAKE_HARDEN_LINK_BUG = false;
+// TODO:
+// 封印中の防御レイジスキルの発動可否は未検証。
+// 検証結果が判明したら仕様を更新する。
+const SEAL_BLOCKS_DEFENSE_RAGE_SKILLS = true;
 
 class Fighter {
   constructor(data) {
@@ -4534,7 +4538,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
   };
 
   const applyCounterHit = (defender, attacker) => {
-    if (defender.counterReady && defender.hp > 0) {
+    if (defender.counterReady) {
       const counterDmg = Math.round(defender.getATK() * (defender.counterParam || 0.25));
       const attackerHpBefore = attacker.hp;
       attacker.hp = Math.max(0, attacker.hp - counterDmg);
@@ -4598,8 +4602,16 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       return `${side}: ${fighterName(target)}`;
     };
 
-  const activateDefenseSkill = (def, attacker) => {
+  const activateDefenseSkill = (def, attacker, options = {}) => {
     const rageBefore = def.defRage;
+    if (SEAL_BLOCKS_DEFENSE_RAGE_SKILLS && options.skillSealActive) {
+      return {
+        triggered: false,
+        reason: 'skill_sealed_defense_provisional',
+        rageBefore,
+        rageAfter: def.defRage,
+      };
+    }
     const defReactSkill = def.getActiveDefenseSkill();
     if (!defReactSkill) {
       return {
@@ -4693,6 +4705,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     // スキル抑制: 交代直後 or 敵が回避持ち（firstDodge）の場合は通常攻撃を優先
     const skipByDodge = def.firstDodge;
     const skipBySeal = atk.skillSealTurns > 0;
+    const defenderSealActiveForDefense = def.skillSealTurns > 0;
     const skipSkill = atk.suppressNextSkill || skipByDodge || skipBySeal;
     let attackSkillAvailable = !skipSkill && !!atk.getActiveAttackSkill();
     let attackSkillSkipReason = null;
@@ -4722,7 +4735,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
 
     // === 防御スキル（反応型）: 攻撃を受ける側がレイジ消費して発動 ===
     if (!skipEntryFirstDefense) {
-      mainDefenseInfo = activateDefenseSkill(def, atk);
+      mainDefenseInfo = activateDefenseSkill(def, atk, { skillSealActive: defenderSealActiveForDefense });
       targetRageSteps.push({ label: 'defense_skill_consume_or_check', value: rageState(def), detail: mainDefenseInfo });
     } else {
       mainDefenseInfo = {
@@ -4996,11 +5009,16 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           comboTarget.entryEffectsAppliedByCarryover = true;
         }
 
-        // 連撃2発目も、着弾前に防御スキルを判定する
+        // 連撃2発目以降は防御レイジスキルの発動判定を行わない
         const comboStateBefore = { actor: fighterState(atk), target: fighterState(comboTarget) };
         const comboTargetRageSteps = [{ label: 'start', value: rageState(comboTarget) }];
         const comboActorRageSteps = [{ label: 'start', value: rageState(atk) }];
-        const comboDefenseInfo = comboTarget.hp > 0 ? activateDefenseSkill(comboTarget, atk) : {
+        const comboDefenseInfo = comboTarget.hp > 0 ? {
+          triggered: false,
+          reason: 'multi_hit_defense_check_skipped',
+          rageBefore: comboTarget.defRage,
+          rageAfter: comboTarget.defRage,
+        } : {
           triggered: false,
           reason: 'target_not_alive',
           rageBefore: comboTarget.defRage,
