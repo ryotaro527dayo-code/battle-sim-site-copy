@@ -5917,6 +5917,12 @@ async function shareCurrentResult() {
     } else {
   await copyShareText(text);
 }
+  } catch(e) {
+    if (e && e.name === 'AbortError') return;
+    try { await copyShareText(text); }
+    catch(err) { alert(t('shareFailed')); }
+  }
+}
 
 function selectedAnalysisMode() {
   return document.getElementById('analysisModeSelect')?.value || 'normal';
@@ -6051,12 +6057,6 @@ function downloadJsonAnalysisLog() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-}
-  } catch(e) {
-    if (e && e.name === 'AbortError') return;
-    try { await copyShareText(text); }
-    catch(err) { alert(t('shareFailed')); }
-  }
 }
 
 // ===== UI 関数 =====
