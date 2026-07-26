@@ -4286,8 +4286,9 @@ const ENABLE_QUAKE_HARDEN_LINK_BUG = false;
 const SKILL_SEAL_BLOCKS_DEFENSE_SKILLS = true;
 
 class Fighter {
-  constructor(data) {
+  constructor(data, instanceId = null) {
     this.data = data;
+    this.instanceId = instanceId;
     this.name = data.name;
     this.maxHP = data.dur * 4;
     this.hp = (data.hp_start != null && data.hp_start > 0) ? Math.min(data.hp_start, this.maxHP) : this.maxHP;
@@ -4307,6 +4308,7 @@ class Fighter {
     this.attackCount = 0;
     this.agiDebuffAttacksLeft = 0;
     this.agiDebuffAmount = 0;
+    this.slowEffect = null;
     this.attackRageBonus = 0;
     this.rapidAtkPenalty = 0;
     this.entryAtkBonus = 0;
@@ -4446,8 +4448,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
   const validB = teamDataB.filter(Boolean);
   if (!validA.length || !validB.length) return null;
 
-  const teamA = validA.map(d => new Fighter(d));
-  const teamB = validB.map(d => new Fighter(d));
+  const teamA = validA.map((d, index) => new Fighter(d, `A-${index}`));
+  const teamB = validB.map((d, index) => new Fighter(d, `B-${index}`));
 
   const log = [];
   const push = (cls, msg) => { if (verbose) log.push({ cls, msg }); };
@@ -4474,6 +4476,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
   const fighterRef = (fighter) => fighter ? ({
     team: fighterSide(fighter),
     index: fighterIndex(fighter),
+    instanceId: fighter.instanceId,
     beastId: fighter.data.id,
     name: fighterName(fighter),
   }) : null;
@@ -4491,6 +4494,11 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       damageBonusTurns: fighter.damageBonusTurns || 0,
       lacerateTurns: fighter.lacerateTurns || 0,
       agiDebuffAttacksLeft: fighter.agiDebuffAttacksLeft || 0,
+      slowEffect: fighter.slowEffect ? {
+        sourceInstanceId: fighter.slowEffect.sourceInstanceId,
+        targetInstanceId: fighter.slowEffect.targetInstanceId,
+        attacksUntilRemoval: fighter.slowEffect.attacksUntilRemoval,
+      } : null,
       backwaterHitsLeft: fighter.backwaterHitsLeft || 0,
       hardenReady: !!fighter.hardenReady,
       toxicSkinReady: !!fighter.toxicSkinReady,
@@ -4555,6 +4563,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     statusChanges: [],
     attackSkillCheck: null,
     defenseSkillCheck: null,
+    slowDecrement: null,
   });
   const makeDamageDebug = ({
     attackerAttack,
@@ -5184,7 +5193,16 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       const hpBeforePurify = def.hp;
       const maxHpBeforePurify = def.maxHP;
       if (def.damageBonusTurns > 0) { def.damageBonusTurns = Math.max(0, def.damageBonusTurns - 2); removed++; }
-      if (def.agiDebuffAttacksLeft > 0) { def.agiDebuffAttacksLeft = Math.max(0, def.agiDebuffAttacksLeft - 2); removed++; }
+      if (def.agiDebuffAttacksLeft > 0) {
+        def.agiDebuffAttacksLeft = Math.max(0, def.agiDebuffAttacksLeft - 2);
+        if (def.slowEffect) def.slowEffect.attacksUntilRemoval = def.agiDebuffAttacksLeft;
+        if (def.agiDebuffAttacksLeft === 0) {
+          def.agi += def.agiDebuffAmount;
+          def.agiDebuffAmount = 0;
+          def.slowEffect = null;
+        }
+        removed++;
+      }
       if (def.lacerateTurns > 0) { def.lacerateTurns = Math.max(0, def.lacerateTurns - 2); removed++; }
       if (def.poisonStacks > 0) { def.poisonStacks = Math.max(0, def.poisonStacks - 2); removed++; }
       const heal = Math.min(removed * 2, 2) * getParam(def.data, 'purify', 'param', defReactSkill.param || 5);
@@ -5208,6 +5226,49 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       atk.attackCount++;
       if (atk.damageBonusTurns > 0) atk.damageBonusTurns = Math.max(0, atk.damageBonusTurns - 1);
       if (atk.weakAtkTurns > 0) atk.weakAtkTurns = Math.max(0, atk.weakAtkTurns - 1);
+    };
+    const decrementTargetSlowAfterAttack = (attacker, target) => {
+      const effect = target.slowEffect;
+      const attackerOwnEffect = attacker.slowEffect;
+      const loggedEffect = effect || attackerOwnEffect;
+      const attacksUntilRemovalBefore = loggedEffect?.attacksUntilRemoval ?? 0;
+      const debug = {
+        slowSourceInstanceId: loggedEffect?.sourceInstanceId ?? null,
+        slowTargetInstanceId: loggedEffect?.targetInstanceId ?? null,
+        attacksUntilRemovalBefore,
+        attacksUntilRemovalAfter: attacksUntilRemovalBefore,
+        decrementTriggered: false,
+        decrementReason: effect
+          ? 'source_or_target_instance_mismatch'
+          : attackerOwnEffect
+            ? 'slowed_target_own_action_does_not_decrement'
+            : 'no_active_slow',
+      };
+      if (!effect) return debug;
+      if (attacker.instanceId !== effect.sourceInstanceId) {
+        debug.decrementReason = 'attacker_not_slow_source';
+        return debug;
+      }
+      if (target.instanceId !== effect.targetInstanceId) {
+        debug.decrementReason = 'target_not_slow_target';
+        return debug;
+      }
+
+      effect.attacksUntilRemoval = Math.max(0, effect.attacksUntilRemoval - 1);
+      target.agiDebuffAttacksLeft = effect.attacksUntilRemoval;
+      debug.attacksUntilRemovalAfter = effect.attacksUntilRemoval;
+      debug.decrementTriggered = true;
+      debug.decrementReason = effect.attacksUntilRemoval === 0
+        ? 'matching_source_target_attack_slow_expired'
+        : 'matching_source_target_attack';
+
+      if (effect.attacksUntilRemoval === 0) {
+        target.agi += target.agiDebuffAmount;
+        target.agiDebuffAmount = 0;
+        target.slowEffect = null;
+        push('log-buff', t('speedDebuffEnd', fighterName(target)));
+      }
+      return debug;
     };
 
     const tryDefenseDodge = (target) => {
@@ -5758,14 +5819,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     atk.attackCount++;
     if (atk.damageBonusTurns > 0) atk.damageBonusTurns = Math.max(0, atk.damageBonusTurns - 1);
     if (atk.weakAtkTurns > 0) atk.weakAtkTurns = Math.max(0, atk.weakAtkTurns - 1);
-    if (atk.agiDebuffAttacksLeft > 0) {
-      atk.agiDebuffAttacksLeft--;
-      if (atk.agiDebuffAttacksLeft === 0) {
-        atk.agi += atk.agiDebuffAmount;
-        atk.agiDebuffAmount = 0;
-        push('log-buff', t('speedDebuffEnd', fighterName(atk)));
-      }
-    }
+    const slowDecrementDebug = decrementTargetSlowAfterAttack(atk, def);
 
     // メイン攻撃ログ
     const skillLabel = atkSkill ? `【${skillName(atkSkill)}】` : t('normalAttack');
@@ -5799,6 +5853,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         defense: mainDefenseInfo,
         attackSkillCheck,
         defenseSkillCheck: mainDefenseInfo?.check || null,
+        slowDecrement: slowDecrementDebug,
       }),
       stateAfter: { actor: fighterState(atk), target: fighterState(def) },
       effectsApplied: [],
@@ -6141,6 +6196,11 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         def.agi = Math.max(1, def.agi - agiDown);
         def.agiDebuffAttacksLeft = 2;
         def.agiDebuffAmount += agiDown;
+        def.slowEffect = {
+          sourceInstanceId: atk.instanceId,
+          targetInstanceId: def.instanceId,
+          attacksUntilRemoval: def.agiDebuffAttacksLeft,
+        };
         const slowActionProgress = analysisEnabled
           ? describePreservedActionProgress(def, agiBeforeSlow, def.getAGI())
           : null;
@@ -6165,6 +6225,12 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               agiDown,
               agiAfter: def.getAGI(),
               remainingAttacks: def.agiDebuffAttacksLeft,
+              slowSourceInstanceId: def.slowEffect.sourceInstanceId,
+              slowTargetInstanceId: def.slowEffect.targetInstanceId,
+              attacksUntilRemovalBefore: 0,
+              attacksUntilRemovalAfter: def.slowEffect.attacksUntilRemoval,
+              decrementTriggered: false,
+              decrementReason: 'slow_applied',
               ...(slowActionProgress || {}),
             },
             statusChanges: [
