@@ -4458,6 +4458,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
   const analysisMode = options?.analysisMode === 'developer' ? 'developer' : options?.analysisMode === 'detail' ? 'detail' : 'normal';
   const analysisEnabled = analysisMode !== 'normal';
   const developerLog = analysisMode === 'developer';
+  const debugFullSnapshot = options?.debugFullSnapshot === true;
+  const includeTeamSnapshots = debugFullSnapshot;
   const analysisEvents = [];
   const battleId = options?.battleId || 'battle-local';
   let actionNo = 0;
@@ -4503,9 +4505,12 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     },
   }) : null;
   const rageState = (fighter) => fighter ? ({ attack: fighter.atkRage, defense: fighter.defRage }) : null;
+  let rngSequence = 0;
   const rand = (purpose) => {
+    rngSequence += 1;
     const value = Math.random();
-    if (developerLog && currentRandomLog) currentRandomLog.push({ purpose, value });
+    const entry = { seed: null, sequenceIndex: rngSequence, purpose, rawRoll: value, convertedValue: null };
+    if (developerLog && currentRandomLog) currentRandomLog.push(entry);
     return value;
   };
   const RAGE_GAIN_FORMULA = 'Math.floor((will + 13) / 4)';
@@ -4523,6 +4528,11 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       roundingMethod: null,
       finalDamage: null,
       steps: [],
+      formula: null,
+      damageBonusBreakdown: [],
+      defenseMultiplierBreakdown: [],
+      skillCalculation: null,
+      rng: null,
     },
     hp: {
       hpBefore: null,
@@ -4534,10 +4544,15 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       maxHpAfter: null,
       finalHp: null,
       lethal: null,
+      steps: [],
+      maxHpCalculation: null,
     },
     rage: null,
     defense: null,
     status: null,
+    statusChanges: [],
+    attackSkillCheck: null,
+    defenseSkillCheck: null,
   });
   const makeDamageDebug = ({
     attackerAttack,
@@ -4552,7 +4567,13 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     roundingMethod = 'Math.round',
     finalDamage,
     steps = [],
+    formula = null,
+    damageBonusBreakdown = [{ source: 'base', operation: 'set', value: 1 }],
+    defenseMultiplierBreakdown = [{ source: 'base', operation: 'set', value: 1 }],
+    skillCalculation = null,
+    rng = null,
   }) => ({
+    formula,
     attackerAttack,
     defenderDurability,
     baseDamage,
@@ -4565,8 +4586,12 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     roundingMethod,
     finalDamage,
     steps,
+    damageBonusBreakdown,
+    defenseMultiplierBreakdown,
+    skillCalculation,
+    rng,
   });
-  const makeHpDebug = ({ hpBefore, damageApplied, hpAfterDamageBeforeClamp, hpAfterClamp, healing, maxHpBefore, maxHpAfter, finalHp }) => ({
+  const makeHpDebug = ({ hpBefore, damageApplied, hpAfterDamageBeforeClamp, hpAfterClamp, healing, maxHpBefore, maxHpAfter, finalHp, steps = [], maxHpCalculation = null }) => ({
     hpBefore,
     damageApplied,
     hpAfterDamageBeforeClamp,
@@ -4576,6 +4601,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     maxHpAfter,
     finalHp,
     lethal: hpBefore > 0 && finalHp <= 0,
+    steps,
+    maxHpCalculation,
   });
   const makeRageGainDebug = ({ will, calculatedGain, rageBefore, rageAfter, cap, modifiers = [] }) => {
     const uncappedRageAfter = rageBefore + calculatedGain;
@@ -4591,13 +4618,320 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       finalRage: rageAfter,
     };
   };
+  const makeRngInfo = (purpose, rawRoll, convertedValue) => ({
+    seed: null,
+    sequenceIndex: rngSequence,
+    purpose,
+    rawRoll,
+    convertedValue,
+  });
+  const damageStep = ({ order, label, expression, inputs = {}, before = null, multiplier = null, valueBeforeRounding = null, roundingMethod = null, after = null }) => ({
+    order,
+    label,
+    expression,
+    inputs,
+    before,
+    multiplier,
+    valueBeforeRounding,
+    roundingMethod,
+    after,
+  });
+  const orderedDamageSteps = ({
+    baseATK,
+    randomRoll,
+    randomMultiplier,
+    skillMultiplier,
+    skillApplied = false,
+    firstRaw,
+    firstRounded,
+    damageBonusBreakdown = [],
+    defenseMultiplierBreakdown = [],
+    defenseMultiplier,
+    finalRaw,
+    finalDamage,
+    skillLabel,
+  }) => {
+    const steps = [];
+    let order = 1;
+    let runningDamage = baseATK;
+    steps.push(damageStep({
+      order: order++,
+      label: 'base_attack',
+      expression: 'baseATK',
+      inputs: { baseATK },
+      valueBeforeRounding: baseATK,
+      after: baseATK,
+    }));
+
+    const appendSkillMultiplier = () => {
+      const after = runningDamage * skillMultiplier;
+      steps.push(damageStep({
+        order: order++,
+        label: 'skill_multiplier',
+        expression: `${runningDamage} * ${skillMultiplier}`,
+        inputs: { skill: skillLabel || null, skillMultiplier },
+        before: runningDamage,
+        multiplier: skillMultiplier,
+        valueBeforeRounding: after,
+        after,
+      }));
+      runningDamage = after;
+    };
+    const appendRandomMultiplier = () => {
+      const after = runningDamage * randomMultiplier;
+      steps.push(damageStep({
+        order: order++,
+        label: 'random_multiplier',
+        expression: `${runningDamage} * ${randomMultiplier}`,
+        inputs: { randomRoll, randomMultiplier },
+        before: runningDamage,
+        multiplier: randomMultiplier,
+        valueBeforeRounding: after,
+        after,
+      }));
+      runningDamage = after;
+    };
+
+    if (skillApplied) {
+      appendSkillMultiplier();
+      appendRandomMultiplier();
+    } else {
+      appendRandomMultiplier();
+    }
+
+    steps.push(damageStep({
+      order: order++,
+      label: 'rounding',
+      expression: `Math.round(${firstRaw})`,
+      inputs: { stage: 'initial_damage' },
+      before: firstRaw,
+      roundingMethod: 'Math.round',
+      after: firstRounded,
+    }));
+
+    let runningMultiplier = 1;
+    steps.push(damageStep({
+      order: order++,
+      label: 'target_multiplier_base',
+      expression: 'let dmgMult = 1',
+      inputs: { source: 'base' },
+      before: null,
+      after: runningMultiplier,
+    }));
+    for (const item of damageBonusBreakdown.slice(1)) {
+      const before = runningMultiplier;
+      runningMultiplier = item.after;
+      steps.push(damageStep({
+        order: order++,
+        label: 'damage_bonus_adjustment',
+        expression: `dmgMult = ${before} + ${item.value}`,
+        inputs: { source: item.source, operation: item.operation, value: item.value },
+        before,
+        after: runningMultiplier,
+      }));
+    }
+    steps.push(damageStep({
+      order: order++,
+      label: 'damage_bonus_multiplier',
+      expression: `const damageBonusMultiplierForLog = ${runningMultiplier}`,
+      inputs: { source: 'accumulated_damage_bonus' },
+      before: 1,
+      multiplier: runningMultiplier,
+      after: runningMultiplier,
+    }));
+    for (const item of defenseMultiplierBreakdown.slice(1)) {
+      const before = runningMultiplier;
+      runningMultiplier = item.after;
+      steps.push(damageStep({
+        order: order++,
+        label: 'defense_multiplier_adjustment',
+        expression: `dmgMult = Math.max(0, ${before} - ${item.value})`,
+        inputs: { source: item.source, operation: item.operation, value: item.value },
+        before,
+        after: runningMultiplier,
+      }));
+    }
+    steps.push(damageStep({
+      order: order++,
+      label: 'defense_multiplier',
+      expression: `${firstRounded} * ${defenseMultiplier}`,
+      inputs: { dmgMult: defenseMultiplier },
+      before: firstRounded,
+      multiplier: defenseMultiplier,
+      valueBeforeRounding: finalRaw,
+      after: finalRaw,
+    }));
+    steps.push(damageStep({
+      order: order++,
+      label: 'rounding',
+      expression: `Math.round(${finalRaw})`,
+      inputs: { stage: 'final_damage' },
+      before: finalRaw,
+      roundingMethod: 'Math.round',
+      after: finalDamage,
+    }));
+    return steps;
+  };
+  const singleRoundDamageSteps = ({
+    baseATK,
+    baseLabel = 'baseATK',
+    skillMultiplier,
+    randomRoll,
+    randomMultiplier,
+    damageBonusBreakdown = [{ source: 'base', operation: 'set', value: 1 }],
+    defenseMultiplierBreakdown = [{ source: 'base', operation: 'set', value: 1 }],
+    combinedMultiplier = 1,
+    finalRaw,
+    finalDamage,
+    skillLabel,
+  }) => {
+    const steps = [];
+    let order = 1;
+    const afterSkill = baseATK * skillMultiplier;
+    const afterRandom = afterSkill * randomMultiplier;
+    steps.push(damageStep({
+      order: order++,
+      label: 'base_attack',
+      expression: baseLabel,
+      inputs: { [baseLabel]: baseATK },
+      valueBeforeRounding: baseATK,
+      after: baseATK,
+    }));
+    steps.push(damageStep({
+      order: order++,
+      label: 'skill_multiplier',
+      expression: `${baseATK} * ${skillMultiplier}`,
+      inputs: { skill: skillLabel || null, skillMultiplier },
+      before: baseATK,
+      multiplier: skillMultiplier,
+      valueBeforeRounding: afterSkill,
+      after: afterSkill,
+    }));
+    steps.push(damageStep({
+      order: order++,
+      label: 'random_multiplier',
+      expression: `${afterSkill} * ${randomMultiplier}`,
+      inputs: { randomRoll, randomMultiplier },
+      before: afterSkill,
+      multiplier: randomMultiplier,
+      valueBeforeRounding: afterRandom,
+      after: afterRandom,
+    }));
+    let runningMultiplier = 1;
+    steps.push(damageStep({
+      order: order++,
+      label: 'target_multiplier_base',
+      expression: 'let damageMultiplier = 1',
+      inputs: { source: 'base' },
+      after: runningMultiplier,
+    }));
+    for (const item of damageBonusBreakdown.slice(1)) {
+      const before = runningMultiplier;
+      runningMultiplier = item.after;
+      steps.push(damageStep({
+        order: order++,
+        label: 'damage_bonus_adjustment',
+        expression: `damageMultiplier = ${before} + ${item.value}`,
+        inputs: { source: item.source, operation: item.operation, value: item.value },
+        before,
+        after: runningMultiplier,
+      }));
+    }
+    steps.push(damageStep({
+      order: order++,
+      label: 'damage_bonus_multiplier',
+      expression: `const damageBonusMultiplierForLog = ${runningMultiplier}`,
+      inputs: { source: 'accumulated_damage_bonus' },
+      before: 1,
+      multiplier: runningMultiplier,
+      after: runningMultiplier,
+    }));
+    for (const item of defenseMultiplierBreakdown.slice(1)) {
+      const before = runningMultiplier;
+      runningMultiplier = item.after;
+      steps.push(damageStep({
+        order: order++,
+        label: 'defense_multiplier_adjustment',
+        expression: `damageMultiplier = Math.max(0, ${before} - ${item.value})`,
+        inputs: { source: item.source, operation: item.operation, value: item.value },
+        before,
+        after: runningMultiplier,
+      }));
+    }
+    steps.push(damageStep({
+      order: order++,
+      label: 'defense_multiplier',
+      expression: `${afterRandom} * ${combinedMultiplier}`,
+      inputs: { combinedMultiplier },
+      before: afterRandom,
+      multiplier: combinedMultiplier,
+      valueBeforeRounding: finalRaw,
+      after: finalRaw,
+    }));
+    steps.push(damageStep({
+      order: order++,
+      label: 'rounding',
+      expression: `Math.round(${finalRaw})`,
+      inputs: { stage: 'final_damage' },
+      before: finalRaw,
+      roundingMethod: 'Math.round',
+      after: finalDamage,
+    }));
+    return steps;
+  };
+  const hpDamageSteps = ({ hpBefore, damage, afterBeforeClamp, afterClamp, healing, maxHpBefore, maxHpAfter, finalHp, damageSource }) => {
+    const steps = [
+      { order: 1, label: 'hp_before', value: hpBefore },
+      {
+        order: 2,
+        label: 'damage_applied',
+        source: damageSource || 'damage',
+        expression: `${hpBefore} - ${damage}`,
+        before: hpBefore,
+        delta: -damage,
+        afterBeforeClamp,
+        after: afterClamp,
+      },
+    ];
+    let order = 3;
+    if (afterBeforeClamp < 0) {
+      steps.push({ order: order++, label: 'clamp_minimum', source: 'hp_minimum', before: afterBeforeClamp, minimum: 0, after: afterClamp });
+    }
+    if (healing) {
+      steps.push({
+        order: order++,
+        label: 'healing_or_lethal_recovery',
+        source: 'checkUndying_or_hp_resolution',
+        before: afterClamp,
+        delta: healing,
+        afterBeforeCap: afterClamp + healing,
+        maxHp: maxHpAfter,
+        after: finalHp,
+      });
+    }
+    if (maxHpBefore !== maxHpAfter) {
+      steps.push({ order: order++, label: 'max_hp_changed', source: 'max_hp_effect_resolution', before: maxHpBefore, after: maxHpAfter });
+    }
+    steps.push({ order, label: 'final_hp', value: finalHp });
+    return steps;
+  };
   const recordAnalysis = (event) => {
     if (!analysisEnabled) return;
+    if (event.debugCalculation) {
+      const debug = event.debugCalculation;
+      if (debug.hp && !debug.hpCalculation) debug.hpCalculation = debug.hp;
+      if (!debug.maxHpCalculation && debug.hpCalculation?.maxHpCalculation) {
+        debug.maxHpCalculation = debug.hpCalculation.maxHpCalculation;
+      }
+      if (!debug.attackSkillCheck && event.attackSkill?.check) debug.attackSkillCheck = event.attackSkill.check;
+      if (!debug.defenseSkillCheck && event.defense?.check) debug.defenseSkillCheck = event.defense.check;
+    }
     analysisEvents.push(Object.assign({
       battleId,
       actionNo,
       matchupNo,
       mode: analysisMode,
+      debugFullSnapshot,
     }, event));
   };
   let actionHadCarryover = false;
@@ -4671,6 +5005,13 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             defenseMultiplier: 1,
             valueBeforeRounding: counterRawDamage,
             finalDamage: counterDmg,
+            formula: 'Math.round(counterAttackerAttack * counterMultiplier)',
+            steps: [
+              damageStep({ order: 1, label: 'base_attack', expression: 'counterAttackerAttack', inputs: { counterAttackerAttack }, valueBeforeRounding: counterAttackerAttack, after: counterAttackerAttack }),
+              damageStep({ order: 2, label: 'counter_multiplier', expression: `${counterAttackerAttack} * ${counterMultiplier}`, before: counterAttackerAttack, multiplier: counterMultiplier, valueBeforeRounding: counterRawDamage, after: counterRawDamage }),
+              damageStep({ order: 3, label: 'final_rounding', expression: `Math.round(${counterRawDamage})`, before: counterRawDamage, roundingMethod: 'Math.round', after: counterDmg }),
+            ],
+            skillCalculation: { skillId: 'counter', skillName: '反撃', hitIndex: 'counter', configuredRatio: counterMultiplier, appliedRatio: counterMultiplier, source: 'defender.counterParam' },
           }),
           hp: makeHpDebug({
             hpBefore: attackerHpBefore,
@@ -4681,6 +5022,18 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             maxHpBefore: attackerMaxHpBefore,
             maxHpAfter: attacker.maxHP,
             finalHp: attackerHpAfterResolution,
+            steps: hpDamageSteps({
+              hpBefore: attackerHpBefore,
+              damage: counterDmg,
+              afterBeforeClamp: attackerHpAfterDamageBeforeClamp,
+              afterClamp: attackerHpAfterClamp,
+              healing: attackerHpAfterResolution - attackerHpAfterClamp,
+              maxHpBefore: attackerMaxHpBefore,
+              maxHpAfter: attacker.maxHP,
+              finalHp: attackerHpAfterResolution,
+              damageSource: 'counter',
+            }),
+            maxHpCalculation: { maxHpBefore: attackerMaxHpBefore, steps: [], maxHpAfter: attacker.maxHP },
           }),
           defense: {
             skill: '防御-反撃',
@@ -4707,15 +5060,17 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     const actionStateBefore = {
       actor: fighterState(atk),
       target: fighterState(def),
-      teams: {
-        A: teamA.map(f => fighterState(f)),
-        B: teamB.map(f => fighterState(f)),
-      },
       pendingEntryFirstNormal: pendingEntryFirstNormal ? {
         attacker: fighterRef(pendingEntryFirstNormal.attacker),
         defender: fighterRef(pendingEntryFirstNormal.defender),
       } : null,
     };
+    if (includeTeamSnapshots) {
+      actionStateBefore.teams = {
+        A: teamA.map(f => fighterState(f)),
+        B: teamB.map(f => fighterState(f)),
+      };
+    }
     const actorRageSteps = [{ label: 'start', value: rageState(atk) }];
     const targetRageSteps = [{ label: 'start', value: rageState(def) }];
     let mainDefenseInfo = null;
@@ -4739,6 +5094,18 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       requiredRage,
       skillId: candidateDefenseSkill?.effect || null,
       skillName: candidateDefenseSkill ? skillName(candidateDefenseSkill) : null,
+      check: {
+        skillId: candidateDefenseSkill?.effect || null,
+        skillName: candidateDefenseSkill ? skillName(candidateDefenseSkill) : null,
+        checks: [
+          { condition: 'has_defense_skill', passed: !!candidateDefenseSkill },
+          { condition: 'defense_rage_at_least_cost', passed: candidateDefenseSkill ? rageBefore >= requiredRage : false, actual: rageBefore, required: requiredRage },
+          { condition: 'not_sealed_provisional', passed: !options.skillSealActive, actual: !!options.skillSealActive },
+          { condition: 'not_multi_hit_skipped', passed: options.reason !== 'multi_hit_defense_check_skipped', actual: options.reason || null },
+          { condition: 'not_entry_first_normal_suppressed', passed: options.reason !== 'entry_first_normal_defense_suppressed', actual: options.reason || null },
+        ],
+        result: availableDefenseSkill && !options.skillSealActive ? 'defense_skill' : 'not_triggered',
+      },
     };
     if (SEAL_BLOCKS_DEFENSE_RAGE_SKILLS && options.skillSealActive) {
       return {
@@ -4846,6 +5213,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       target.defDodgeReady = false;
       target.defDodgeParam = 0;
       const roll = rand('defense_dodge');
+      if (developerLog && currentRandomLog?.length) currentRandomLog[currentRandomLog.length - 1].convertedValue = roll;
       mainDodgeInfo = { checked: true, chance, roll, success: roll < chance };
       if (roll < chance) {
         consumeAttackProgress();
@@ -4860,6 +5228,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     const skipByDodge = def.firstDodge;
     const skipBySeal = atk.skillSealTurns > 0;
     const defenderSealActiveForDefense = def.skillSealTurns > 0;
+    const attackSkillCandidate = atk.data.skills.find(s => s.type === 'attack') || null;
+    const attackSkillCost = attackSkillCandidate ? getParam(atk.data, attackSkillCandidate.effect, 'rageCost', attackSkillCandidate.rageCost || 0) : null;
     const skipSkill = atk.suppressNextSkill || skipByDodge || skipBySeal;
     let attackSkillAvailable = !skipSkill && !!atk.getActiveAttackSkill();
     let attackSkillSkipReason = null;
@@ -4867,6 +5237,19 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     else if (skipByDodge) attackSkillSkipReason = 'target_first_dodge_forces_normal';
     else if (atk.suppressNextSkill) attackSkillSkipReason = 'entry_suppression';
     else if (!attackSkillAvailable) attackSkillSkipReason = 'insufficient_attack_rage_or_no_attack_skill';
+    const attackSkillCheck = {
+      skillId: attackSkillCandidate?.effect || null,
+      skillName: attackSkillCandidate ? skillName(attackSkillCandidate) : null,
+      checks: [
+        { condition: 'has_attack_skill', passed: !!attackSkillCandidate },
+        { condition: 'attack_rage_at_least_cost', passed: attackSkillCandidate ? atk.atkRage >= attackSkillCost : false, actual: atk.atkRage, required: attackSkillCost },
+        { condition: 'not_sealed', passed: !skipBySeal, actual: skipBySeal },
+        { condition: 'not_forced_normal_by_first_dodge', passed: !skipByDodge, actual: skipByDodge },
+        { condition: 'not_entry_suppressed', passed: !atk.suppressNextSkill, actual: atk.suppressNextSkill },
+      ],
+      result: attackSkillAvailable ? 'attack_skill' : 'normal_attack',
+      reason: attackSkillAvailable ? null : attackSkillSkipReason,
+    };
     // 虚弱のスキル封印は「自分/相手を合わせた行動数」で進む。
     // 判定は減少前に行い、この行動が封印対象なら通常攻撃になる。
     const statusTickBefore = [atk, def].map(f => ({
@@ -4892,6 +5275,43 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       change.skillSealTurnsBefore !== change.skillSealTurnsAfter ||
       change.agiDebuffAttacksLeftBefore !== change.agiDebuffAttacksLeftAfter
     );
+    const statusTickChangeEvents = statusTickChanges.flatMap(change => {
+      const events = [];
+      if (change.skillSealTurnsBefore !== change.skillSealTurnsAfter) {
+        events.push({
+          status: 'skillSealTurns',
+          target: change.fighter,
+          before: change.skillSealTurnsBefore,
+          delta: change.skillSealTurnsAfter - change.skillSealTurnsBefore,
+          after: change.skillSealTurnsAfter,
+          reason: change.skillSealTurnsAfter === 0 ? 'expired' : 'turn_consumed',
+          timing: 'action_start',
+        });
+      }
+      if (change.weakAtkTurnsBefore !== change.weakAtkTurnsAfter) {
+        events.push({
+          status: 'weakAtkTurns',
+          target: change.fighter,
+          before: change.weakAtkTurnsBefore,
+          delta: change.weakAtkTurnsAfter - change.weakAtkTurnsBefore,
+          after: change.weakAtkTurnsAfter,
+          reason: change.weakAtkTurnsAfter === 0 ? 'expired' : 'turn_consumed',
+          timing: 'action_start',
+        });
+      }
+      if (change.agiDebuffAttacksLeftBefore !== change.agiDebuffAttacksLeftAfter) {
+        events.push({
+          status: 'agiDebuffAttacksLeft',
+          target: change.fighter,
+          before: change.agiDebuffAttacksLeftBefore,
+          delta: change.agiDebuffAttacksLeftAfter - change.agiDebuffAttacksLeftBefore,
+          after: change.agiDebuffAttacksLeftAfter,
+          reason: change.agiDebuffAttacksLeftAfter === 0 ? 'expired' : 'turn_consumed',
+          timing: 'action_start',
+        });
+      }
+      return events;
+    });
     if (statusTickChanges.length) {
       recordAnalysis({
         eventType: 'status',
@@ -4907,6 +5327,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             attackSkillSealedThisAction: skipBySeal,
             sealedSkillType: skipBySeal ? 'attack_skill' : null,
           },
+          statusChanges: statusTickChangeEvents,
         }),
         stateAfter: { actor: fighterState(atk), target: fighterState(def) },
       });
@@ -4953,6 +5374,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         rageBefore: rageBeforeConsume,
         rageCost: getParam(atk.data, atkSkill.effect, 'rageCost', atkSkill.rageCost || 0),
         rageAfterConsume: atk.atkRage,
+        check: attackSkillCheck,
       };
       actorRageSteps.push({
         label: 'attack_skill_consume',
@@ -4986,37 +5408,56 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     const mainRandomStart = currentRandomLog ? currentRandomLog.length : 0;
     const varianceRoll = rand('damage_variance_main');
     const variance = 0.95 + varianceRoll * 0.10;
-    let dmg = Math.round(baseATK * variance);
+    if (developerLog && currentRandomLog?.length) currentRandomLog[currentRandomLog.length - 1].convertedValue = variance;
+    let firstDamageRaw = baseATK * variance;
+    let dmg = Math.round(firstDamageRaw);
     let skillRatio = atkSkill ? 1 : null;
-    const damageSteps = [{ label: 'base_variance', before: baseATK * variance, after: dmg }];
+    let skillCalculation = {
+      skillId: atkSkill?.effect || null,
+      skillName: atkSkill ? skillName(atkSkill) : null,
+      hitIndex: 1,
+      configuredRatio: atkSkill ? 1 : null,
+      appliedRatio: skillRatio || 1,
+      source: atkSkill ? 'attack_skill_main_default' : 'normal_attack',
+      skillLevel: atkSkill ? 4 : null,
+    };
 
     if (atkSkill?.effect === 'full_power') {
       const fullPowerRatio = getParam(atk.data, 'full_power', 'param', atkSkill.param || 2.30);
       skillRatio = fullPowerRatio;
-      dmg = Math.round(baseATK * fullPowerRatio * variance);
-      damageSteps.push({ label: 'full_power_ratio', ratio: fullPowerRatio, before: baseATK * fullPowerRatio * variance, after: dmg });
+      firstDamageRaw = baseATK * fullPowerRatio * variance;
+      dmg = Math.round(firstDamageRaw);
+      skillCalculation = { skillId: 'full_power', skillName: skillName(atkSkill), hitIndex: 1, configuredRatio: fullPowerRatio, appliedRatio: fullPowerRatio, source: 'getParam(full_power.param)', skillLevel: 4 };
     }
     // 大地震撼: スキル倍率ダメージのみ。追加通常攻撃は発生しない。
     if (atkSkill?.effect === 'quake') {
       const quakeRatio = getParam(atk.data, 'quake', 'param', atkSkill.param || 1.40);
       skillRatio = quakeRatio;
-      dmg = Math.round(baseATK * quakeRatio * variance);
-      damageSteps.push({ label: 'quake_ratio', ratio: quakeRatio, before: baseATK * quakeRatio * variance, after: dmg });
+      firstDamageRaw = baseATK * quakeRatio * variance;
+      dmg = Math.round(firstDamageRaw);
+      skillCalculation = { skillId: 'quake', skillName: skillName(atkSkill), hitIndex: 1, configuredRatio: quakeRatio, appliedRatio: quakeRatio, source: 'getParam(quake.param)', skillLevel: 4 };
     }
     if (atkSkill?.effect === 'toxic_frenzy') {
       skillRatio = toxicFrenzyRatio;
-      dmg = Math.round(baseATK * toxicFrenzyRatio * variance);
-      damageSteps.push({ label: 'toxic_frenzy_ratio', ratio: toxicFrenzyRatio, before: baseATK * toxicFrenzyRatio * variance, after: dmg });
+      firstDamageRaw = baseATK * toxicFrenzyRatio * variance;
+      dmg = Math.round(firstDamageRaw);
+      skillCalculation = { skillId: 'toxic_frenzy', skillName: skillName(atkSkill), hitIndex: 1, configuredRatio: toxicFrenzyRatio, appliedRatio: toxicFrenzyRatio, source: 'getParam(toxic_frenzy.param) + getParam(toxic_frenzy.param2) * poisonStacks', skillLevel: 4 };
     }
 
     // 被ダメ補正
     let dmgMult = 1.0;
+    const damageBonusBreakdown = [{ source: 'base', operation: 'set', value: 1 }];
+    const defenseMultiplierBreakdown = [{ source: 'base', operation: 'set', value: 1 }];
     let defenderHardenTriggered = false;
     if (def.damageBonusTurns > 0) {
+      damageBonusBreakdown.push({ source: 'damage_bonus_status', operation: 'add', value: def.damageBonusPercent, before: dmgMult, after: dmgMult + def.damageBonusPercent });
       dmgMult += def.damageBonusPercent;
     }
+    if (def.tormentBonus) damageBonusBreakdown.push({ source: 'tormentBonus', operation: 'add', value: def.tormentBonus, before: dmgMult, after: dmgMult + def.tormentBonus });
     dmgMult += def.tormentBonus; // 折磨: 被弾側の永続デバフ
+    const damageBonusMultiplierForLog = dmgMult;
     if (def.hardenReady) {
+      defenseMultiplierBreakdown.push({ source: '防御-硬化皮膚', operation: 'subtract', value: def.hardenParam || 0.20, before: dmgMult, after: Math.max(0, dmgMult - (def.hardenParam || 0.20)) });
       dmgMult = Math.max(0, dmgMult - (def.hardenParam || 0.20));
       defenderHardenTriggered = true;
       def.hardenReady = false;
@@ -5024,13 +5465,28 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       push('log-buff', t('hardenTriggered', fighterName(def)));
     }
     if (def.toxicSkinReady) {
+      defenseMultiplierBreakdown.push({ source: '防御-毒性皮膚', operation: 'subtract', value: def.toxicSkinParam || 0.20, before: dmgMult, after: Math.max(0, dmgMult - (def.toxicSkinParam || 0.20)) });
       dmgMult = Math.max(0, dmgMult - (def.toxicSkinParam || 0.20));
       def.toxicSkinReady = false;
       push('log-buff', t('toxicSkinTriggered', fighterName(def)));
     }
     const dmgBeforeDefenseMult = dmg;
     dmg = Math.round(dmg * dmgMult);
-    damageSteps.push({ label: 'defender_damage_multiplier', multiplier: dmgMult, before: dmgBeforeDefenseMult * dmgMult, after: dmg });
+    const damageSteps = orderedDamageSteps({
+      baseATK,
+      randomRoll: varianceRoll,
+      randomMultiplier: variance,
+      skillMultiplier: skillRatio || 1,
+      skillApplied: ['full_power', 'quake', 'toxic_frenzy'].includes(atkSkill?.effect),
+      firstRaw: firstDamageRaw,
+      firstRounded: dmgBeforeDefenseMult,
+      damageBonusBreakdown,
+      defenseMultiplierBreakdown,
+      defenseMultiplier: dmgMult,
+      finalRaw: dmgBeforeDefenseMult * dmgMult,
+      finalDamage: dmg,
+      skillLabel: skillCalculation.skillName,
+    });
     // Temporary game-bug emulation: when Earthshaking Quake is reduced by the
     // defender's Hardened Skin, a beast that also has Hardened Skin receives a
     // free one-hit harden reservation. This does not consume defense rage.
@@ -5051,7 +5507,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       displayed: dmg,
       rawFinalDamage: dmgBeforeDefenseMult * dmgMult,
       roundingMethod: 'Math.round',
-      steps: developerLog ? damageSteps : undefined,
+      steps: damageSteps,
       randoms: developerLog && currentRandomLog ? currentRandomLog.slice(mainRandomStart) : undefined,
     };
     const mainDamageDebug = makeDamageDebug({
@@ -5059,13 +5515,20 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       defenderDurability: def.data?.dur ?? null,
       baseDamage: baseATK,
       skillMultiplier: skillRatio || 1,
-      damageBonusMultiplier: def.damageBonusTurns > 0 ? 1 + def.damageBonusPercent : 1,
+      damageBonusMultiplier: damageBonusMultiplierForLog,
       randomRoll: varianceRoll,
       randomMultiplier: variance,
       defenseMultiplier: dmgMult,
       valueBeforeRounding: dmgBeforeDefenseMult * dmgMult,
       finalDamage: dmg,
       steps: damageSteps,
+      formula: ['full_power', 'quake', 'toxic_frenzy'].includes(atkSkill?.effect)
+        ? 'Math.round(Math.round(baseATK * skillMultiplier * randomMultiplier) * defenseMultiplier)'
+        : 'Math.round(Math.round(baseATK * randomMultiplier) * defenseMultiplier)',
+      damageBonusBreakdown,
+      defenseMultiplierBreakdown,
+      skillCalculation,
+      rng: makeRngInfo('damage_variance_main', varianceRoll, variance),
     });
     if (tryDefenseDodge(def)) {
       recordAnalysis({
@@ -5078,7 +5541,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         actor: fighterRef(atk),
         target: fighterRef(def),
         stateBefore: actionStateBefore,
-        attackSkill: attackSkillInfo || { used: false, available: attackSkillAvailable, reason: attackSkillSkipReason },
+        attackSkill: attackSkillInfo || { used: false, available: attackSkillAvailable, reason: attackSkillSkipReason, check: attackSkillCheck },
         defense: mainDefenseInfo,
         dodge: mainDodgeInfo,
         damage: Object.assign({}, mainDamageInfo, { displayed: 0, dodged: true }),
@@ -5104,7 +5567,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         actor: fighterRef(atk),
         target: fighterRef(def),
         stateBefore: actionStateBefore,
-        attackSkill: attackSkillInfo || { used: false, available: attackSkillAvailable, reason: attackSkillSkipReason },
+        attackSkill: attackSkillInfo || { used: false, available: attackSkillAvailable, reason: attackSkillSkipReason, check: attackSkillCheck },
         defense: mainDefenseInfo,
         dodge: { checked: true, type: 'first_dodge', success: true },
         damage: Object.assign({}, mainDamageInfo, { displayed: 0, dodged: true }),
@@ -5143,6 +5606,22 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       maxHpBefore: targetMaxHpBeforeDamage,
       maxHpAfter: targetMaxHpAfterDamageResolution,
       finalHp: targetHpAfterDamageResolution,
+      steps: hpDamageSteps({
+        hpBefore: targetHpBeforeDamage,
+        damage: dmg,
+        afterBeforeClamp: targetHpAfterDamageBeforeClamp,
+        afterClamp: targetHpAfterDamageClamp,
+        healing: targetHpAfterDamageResolution - targetHpAfterDamageClamp,
+        maxHpBefore: targetMaxHpBeforeDamage,
+        maxHpAfter: targetMaxHpAfterDamageResolution,
+        finalHp: targetHpAfterDamageResolution,
+        damageSource: atkSkill ? skillName(atkSkill) : 'normal_attack',
+      }),
+      maxHpCalculation: {
+        maxHpBefore: targetMaxHpBeforeDamage,
+        steps: targetMaxHpBeforeDamage === targetMaxHpAfterDamageResolution ? [] : [{ source: 'consumeBackwaterHit_or_max_hp_resolution', operation: 'set', before: targetMaxHpBeforeDamage, after: targetMaxHpAfterDamageResolution }],
+        maxHpAfter: targetMaxHpAfterDamageResolution,
+      },
     });
     // 防御レイジ増加は通常攻撃を受けたときのみ（攻撃スキルのメインヒットでは増加しない）
     if (!atkSkill) {
@@ -5202,6 +5681,13 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             defenseMultiplier: 1,
             valueBeforeRounding: reflectRawDmg,
             finalDamage: reflectDmg,
+            formula: 'Math.round(dmg * thornsParam)',
+            steps: [
+              damageStep({ order: 1, label: 'source_damage', expression: 'dmg', inputs: { dmg }, valueBeforeRounding: dmg, after: dmg }),
+              damageStep({ order: 2, label: 'reflect_multiplier', expression: `${dmg} * ${def.thornsParam}`, before: dmg, multiplier: def.thornsParam, valueBeforeRounding: reflectRawDmg, after: reflectRawDmg }),
+              damageStep({ order: 3, label: 'final_rounding', expression: `Math.round(${reflectRawDmg})`, before: reflectRawDmg, roundingMethod: 'Math.round', after: reflectDmg }),
+            ],
+            skillCalculation: { skillId: 'thorns', skillName: '反射', hitIndex: 'reflect', configuredRatio: def.thornsParam, appliedRatio: def.thornsParam, source: 'def.thornsParam' },
           }),
           hp: makeHpDebug({
             hpBefore: reflectBefore,
@@ -5212,6 +5698,18 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             maxHpBefore: reflectMaxBefore,
             maxHpAfter: atk.maxHP,
             finalHp: atk.hp,
+            steps: hpDamageSteps({
+              hpBefore: reflectBefore,
+              damage: reflectDmg,
+              afterBeforeClamp: reflectHpAfterDamageBeforeClamp,
+              afterClamp: reflectAfterClamp,
+              healing: 0,
+              maxHpBefore: reflectMaxBefore,
+              maxHpAfter: atk.maxHP,
+              finalHp: atk.hp,
+              damageSource: 'reflect',
+            }),
+            maxHpCalculation: { maxHpBefore: reflectMaxBefore, steps: [], maxHpAfter: atk.maxHP },
           }),
           defense: { skill: '防御-荊棘外殻', reflectMultiplier: def.thornsParam },
         }),
@@ -5278,7 +5776,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       actor: fighterRef(atk),
       target: fighterRef(def),
       stateBefore: actionStateBefore,
-      attackSkill: attackSkillInfo || { used: false, available: attackSkillAvailable, reason: attackSkillSkipReason },
+      attackSkill: attackSkillInfo || { used: false, available: attackSkillAvailable, reason: attackSkillSkipReason, check: attackSkillCheck },
       defense: mainDefenseInfo,
       dodge: mainDodgeInfo || { checked: false },
       damage: Object.assign({}, mainDamageInfo, {
@@ -5293,6 +5791,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         hp: mainHpDebug,
         rage: { actor: actorRageSteps.map(s => s.detail?.rageCalculation || s.detail || null), target: targetRageSteps.map(s => s.detail?.rageCalculation || s.detail || null) },
         defense: mainDefenseInfo,
+        attackSkillCheck,
+        defenseSkillCheck: mainDefenseInfo?.check || null,
       }),
       stateAfter: { actor: fighterState(atk), target: fighterState(def) },
       effectsApplied: [],
@@ -5307,6 +5807,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         const comboRandomStart = currentRandomLog ? currentRandomLog.length : 0;
         const comboVarianceRoll = rand('damage_variance_combo');
         const comboVariance = 0.95 + comboVarianceRoll * 0.10;
+        if (developerLog && currentRandomLog?.length) currentRandomLog[currentRandomLog.length - 1].convertedValue = comboVariance;
 
         let comboTarget = def;
         let comboCarryOver = false;
@@ -5329,6 +5830,19 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           sealed: comboTarget.skillSealTurns > 0,
           rageBefore: comboTarget.defRage,
           rageAfter: comboTarget.defRage,
+          check: {
+            skillId: comboTarget.data.skills.find(s => s.type === 'defense')?.effect || null,
+            skillName: (() => { const s = comboTarget.data.skills.find(x => x.type === 'defense'); return s ? skillName(s) : null; })(),
+            checks: [
+              { condition: 'has_defense_skill', passed: comboTarget.data.skills.some(s => s.type === 'defense') },
+              { condition: 'defense_rage_at_least_cost', passed: false, actual: comboTarget.defRage, required: null },
+              { condition: 'not_sealed_provisional', passed: comboTarget.skillSealTurns <= 0, actual: comboTarget.skillSealTurns > 0 },
+              { condition: 'not_multi_hit_skipped', passed: false, actual: 'multi_hit_defense_check_skipped' },
+              { condition: 'not_entry_first_normal_suppressed', passed: true, actual: null },
+            ],
+            result: 'not_triggered',
+            reason: 'multi_hit_defense_check_skipped',
+          },
         } : {
           triggered: false,
           reason: 'target_not_alive',
@@ -5336,6 +5850,16 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           sealed: comboTarget.skillSealTurns > 0,
           rageBefore: comboTarget.defRage,
           rageAfter: comboTarget.defRage,
+          check: {
+            skillId: null,
+            skillName: null,
+            checks: [
+              { condition: 'target_alive', passed: false, actual: comboTarget.hp },
+              { condition: 'not_multi_hit_skipped', passed: false, actual: 'target_not_alive' },
+            ],
+            result: 'not_triggered',
+            reason: 'target_not_alive',
+          },
         };
         comboTargetRageSteps.push({ label: 'defense_skill_consume_or_check', value: rageState(comboTarget), detail: comboDefenseInfo });
 
@@ -5386,17 +5910,24 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           });
         } else {
           let comboMult = 1.0;
+          const comboDamageBonusBreakdown = [{ source: 'base', operation: 'set', value: 1 }];
+          const comboDefenseMultiplierBreakdown = [{ source: 'base', operation: 'set', value: 1 }];
           if (comboTarget.damageBonusTurns > 0) {
+            comboDamageBonusBreakdown.push({ source: 'damage_bonus_status', operation: 'add', value: comboTarget.damageBonusPercent, before: comboMult, after: comboMult + comboTarget.damageBonusPercent });
             comboMult += comboTarget.damageBonusPercent;
           }
+          if (comboTarget.tormentBonus) comboDamageBonusBreakdown.push({ source: 'tormentBonus', operation: 'add', value: comboTarget.tormentBonus, before: comboMult, after: comboMult + comboTarget.tormentBonus });
           comboMult += comboTarget.tormentBonus;
+          const comboDamageBonusMultiplierForLog = comboMult;
           if (comboTarget.hardenReady) {
+            comboDefenseMultiplierBreakdown.push({ source: '防御-硬化皮膚', operation: 'subtract', value: comboTarget.hardenParam || 0.20, before: comboMult, after: Math.max(0, comboMult - (comboTarget.hardenParam || 0.20)) });
             comboMult = Math.max(0, comboMult - (comboTarget.hardenParam || 0.20));
             comboTarget.hardenReady = false;
             comboTarget.hardenSource = null;
             push('log-buff', t('hardenTriggered', fighterName(comboTarget)));
           }
           if (comboTarget.toxicSkinReady) {
+            comboDefenseMultiplierBreakdown.push({ source: '防御-毒性皮膚', operation: 'subtract', value: comboTarget.toxicSkinParam || 0.20, before: comboMult, after: Math.max(0, comboMult - (comboTarget.toxicSkinParam || 0.20)) });
             comboMult = Math.max(0, comboMult - (comboTarget.toxicSkinParam || 0.20));
             comboTarget.toxicSkinReady = false;
             push('log-buff', t('toxicSkinTriggered', fighterName(comboTarget)));
@@ -5405,6 +5936,15 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           const comboRandoms = developerLog && currentRandomLog ? currentRandomLog.slice(comboRandomStart) : undefined;
           const comboRawDamage = comboBaseATK * comboRatio * comboVariance * comboMult;
           const comboDmg = Math.round(comboRawDamage);
+          const comboSkillCalculation = {
+            skillId: 'combo',
+            skillName: skillName(atkSkill),
+            hitIndex: 2,
+            configuredRatio: comboRatio,
+            appliedRatio: comboRatio,
+            source: 'getParam(combo.param)',
+            skillLevel: 4,
+          };
           const comboHpBefore = comboTarget.hp;
           const comboMaxHpBefore = comboTarget.maxHP;
           const comboHpAfterDamageBeforeClamp = comboHpBefore - comboDmg;
@@ -5418,16 +5958,30 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             defenderDurability: comboTarget.data?.dur ?? null,
             baseDamage: comboBaseATK,
             skillMultiplier: comboRatio,
-            damageBonusMultiplier: comboTarget.damageBonusTurns > 0 ? 1 + comboTarget.damageBonusPercent : 1,
+            damageBonusMultiplier: comboDamageBonusMultiplierForLog,
             randomRoll: comboVarianceRoll,
             randomMultiplier: comboVariance,
             defenseMultiplier: comboMult,
             valueBeforeRounding: comboRawDamage,
             finalDamage: comboDmg,
-            steps: [
-              { label: 'combo_raw', formula: 'comboBaseATK * comboRatio * comboVariance * comboMult', value: comboRawDamage },
-              { label: 'round_final', method: 'Math.round', before: comboRawDamage, after: comboDmg },
-            ],
+            steps: singleRoundDamageSteps({
+              baseATK: comboBaseATK,
+              baseLabel: 'comboBaseATK',
+              skillMultiplier: comboRatio,
+              randomRoll: comboVarianceRoll,
+              randomMultiplier: comboVariance,
+              damageBonusBreakdown: comboDamageBonusBreakdown,
+              defenseMultiplierBreakdown: comboDefenseMultiplierBreakdown,
+              combinedMultiplier: comboMult,
+              finalRaw: comboRawDamage,
+              finalDamage: comboDmg,
+              skillLabel: skillName(atkSkill),
+            }),
+            formula: 'Math.round(comboBaseATK * comboRatio * comboVariance * comboMult)',
+            damageBonusBreakdown: comboDamageBonusBreakdown,
+            defenseMultiplierBreakdown: comboDefenseMultiplierBreakdown,
+            skillCalculation: comboSkillCalculation,
+            rng: makeRngInfo('damage_variance_combo', comboVarianceRoll, comboVariance),
           });
           const comboHpDebug = makeHpDebug({
             hpBefore: comboHpBefore,
@@ -5438,6 +5992,22 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             maxHpBefore: comboMaxHpBefore,
             maxHpAfter: comboTarget.maxHP,
             finalHp: comboHpAfterResolution,
+            steps: hpDamageSteps({
+              hpBefore: comboHpBefore,
+              damage: comboDmg,
+              afterBeforeClamp: comboHpAfterDamageBeforeClamp,
+              afterClamp: comboHpAfterClamp,
+              healing: comboHpAfterResolution - comboHpAfterClamp,
+              maxHpBefore: comboMaxHpBefore,
+              maxHpAfter: comboTarget.maxHP,
+              finalHp: comboHpAfterResolution,
+              damageSource: comboCarryOver ? 'combo_carryover' : 'combo',
+            }),
+            maxHpCalculation: {
+              maxHpBefore: comboMaxHpBefore,
+              steps: comboMaxHpBefore === comboTarget.maxHP ? [] : [{ source: 'consumeBackwaterHit_or_max_hp_resolution', operation: 'set', before: comboMaxHpBefore, after: comboTarget.maxHP }],
+              maxHpAfter: comboTarget.maxHP,
+            },
           });
           if (comboTarget.thornsReady) {
             const comboReflectRawDmg = comboDmg * comboTarget.thornsParam;
@@ -5470,6 +6040,13 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
                   defenseMultiplier: 1,
                   valueBeforeRounding: comboReflectRawDmg,
                   finalDamage: comboReflectDmg,
+                  formula: 'Math.round(comboDmg * thornsParam)',
+                  steps: [
+                    damageStep({ order: 1, label: 'source_damage', expression: 'comboDmg', inputs: { comboDmg }, valueBeforeRounding: comboDmg, after: comboDmg }),
+                    damageStep({ order: 2, label: 'reflect_multiplier', expression: `${comboDmg} * ${comboTarget.thornsParam}`, before: comboDmg, multiplier: comboTarget.thornsParam, valueBeforeRounding: comboReflectRawDmg, after: comboReflectRawDmg }),
+                    damageStep({ order: 3, label: 'final_rounding', expression: `Math.round(${comboReflectRawDmg})`, before: comboReflectRawDmg, roundingMethod: 'Math.round', after: comboReflectDmg }),
+                  ],
+                  skillCalculation: { skillId: 'thorns', skillName: '反射', hitIndex: 'combo_reflect', configuredRatio: comboTarget.thornsParam, appliedRatio: comboTarget.thornsParam, source: 'comboTarget.thornsParam' },
                 }),
                 hp: makeHpDebug({
                   hpBefore: reflectBefore,
@@ -5480,6 +6057,18 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
                   maxHpBefore: reflectMaxBefore,
                   maxHpAfter: atk.maxHP,
                   finalHp: atk.hp,
+                  steps: hpDamageSteps({
+                    hpBefore: reflectBefore,
+                    damage: comboReflectDmg,
+                    afterBeforeClamp: reflectHpAfterDamageBeforeClamp,
+                    afterClamp: reflectAfterClamp,
+                    healing: 0,
+                    maxHpBefore: reflectMaxBefore,
+                    maxHpAfter: atk.maxHP,
+                    finalHp: atk.hp,
+                    damageSource: 'combo_reflect',
+                  }),
+                  maxHpCalculation: { maxHpBefore: reflectMaxBefore, steps: [], maxHpAfter: atk.maxHP },
                 }),
                 defense: { skill: '防御-荊棘外殻', reflectMultiplier: comboTarget.thornsParam },
               }),
@@ -5523,6 +6112,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               hpBefore: comboHpBefore,
               hpAfter: comboTarget.hp,
               lethal: comboHpBefore > 0 && comboTarget.hp <= 0,
+              steps: comboDamageDebug.steps,
               randoms: comboRandoms,
             },
             rage: { actor: comboActorRageSteps, target: comboTargetRageSteps },
@@ -5531,6 +6121,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               hp: comboHpDebug,
               rage: { actor: comboActorRageSteps.map(s => s.detail?.rageCalculation || s.detail || null), target: comboTargetRageSteps.map(s => s.detail?.rageCalculation || s.detail || null) },
               defense: comboDefenseInfo,
+              defenseSkillCheck: comboDefenseInfo.check,
             }),
             stateAfter: { actor: fighterState(atk), target: fighterState(comboTarget) },
           });
@@ -5566,6 +6157,30 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               agiAfter: def.getAGI(),
               remainingAttacks: def.agiDebuffAttacksLeft,
             },
+            statusChanges: [
+              {
+                status: 'agi',
+                sourceSkill: skillName(atkSkill),
+                applier: fighterRef(atk),
+                target: fighterRef(def),
+                before: agiBeforeSlow,
+                delta: -agiDown,
+                after: def.getAGI(),
+                reason: 'skill_applied',
+                timing: 'skill_effect',
+              },
+              {
+                status: 'agiDebuffAttacksLeft',
+                sourceSkill: skillName(atkSkill),
+                applier: fighterRef(atk),
+                target: fighterRef(def),
+                before: 0,
+                delta: def.agiDebuffAttacksLeft,
+                after: def.agiDebuffAttacksLeft,
+                reason: 'skill_applied',
+                timing: 'skill_effect',
+              },
+            ],
           }),
           stateAfter: { actor: fighterState(atk), target: fighterState(def) },
         });
@@ -5604,6 +6219,31 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               sealedSkillType: 'attack_skill',
               defenseRageSkillBlockedProvisional: SEAL_BLOCKS_DEFENSE_RAGE_SKILLS,
             },
+            statusChanges: [
+              {
+                status: 'weakAtkTurns',
+                sourceSkill: skillName(atkSkill),
+                applier: fighterRef(atk),
+                target: fighterRef(def),
+                before: weakBefore.weakAtkTurns,
+                delta: def.weakAtkTurns - weakBefore.weakAtkTurns,
+                after: def.weakAtkTurns,
+                reason: 'skill_applied',
+                timing: 'skill_effect',
+              },
+              {
+                status: 'skillSealTurns',
+                sourceSkill: skillName(atkSkill),
+                applier: fighterRef(atk),
+                target: fighterRef(def),
+                before: weakBefore.skillSealTurns,
+                delta: def.skillSealTurns - weakBefore.skillSealTurns,
+                after: def.skillSealTurns,
+                reason: 'skill_applied',
+                timing: 'skill_effect',
+                sealedSkillType: 'attack_skill',
+              },
+            ],
           }),
           stateAfter: { actor: fighterState(atk), target: fighterState(def) },
         });
@@ -5666,9 +6306,14 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
                     valueBeforeRounding: benchRawDamage,
                     finalDamage: benchDmg,
                     steps: [
-                      { label: 'quake_bench_raw', formula: 'baseATK * benchRatio * variance', value: benchRawDamage },
-                      { label: 'round_final', method: 'Math.round', before: benchRawDamage, after: benchDmg },
+                      damageStep({ order: 1, label: 'base_attack', expression: 'baseATK', inputs: { baseATK }, valueBeforeRounding: baseATK, after: baseATK }),
+                      damageStep({ order: 2, label: 'skill_multiplier', expression: `${baseATK} * ${benchRatio}`, before: baseATK, multiplier: benchRatio, valueBeforeRounding: baseATK * benchRatio, after: baseATK * benchRatio }),
+                      damageStep({ order: 3, label: 'random_multiplier', expression: `${baseATK * benchRatio} * ${variance}`, inputs: { randomRoll: varianceRoll, randomMultiplier: variance }, before: baseATK * benchRatio, multiplier: variance, valueBeforeRounding: benchRawDamage, after: benchRawDamage }),
+                      damageStep({ order: 4, label: 'final_rounding', expression: `Math.round(${benchRawDamage})`, before: benchRawDamage, roundingMethod: 'Math.round', after: benchDmg }),
                     ],
+                    formula: 'Math.round(baseATK * benchRatio * variance)',
+                    skillCalculation: { skillId: 'quake', skillName: skillName(atkSkill), hitIndex: `bench-${i}`, configuredRatio: benchRatio, appliedRatio: benchRatio, source: 'getParam(quake.param2)' },
+                    rng: makeRngInfo('damage_variance_main', varianceRoll, variance),
                   }),
                   hp: makeHpDebug({
                     hpBefore: benchHpBefore,
@@ -5679,6 +6324,18 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
                     maxHpBefore: benchMaxHpBefore,
                     maxHpAfter: benched.maxHP,
                     finalHp: benchHpAfterResolution,
+                    steps: hpDamageSteps({
+                      hpBefore: benchHpBefore,
+                      damage: benchDmg,
+                      afterBeforeClamp: benchHpAfterDamageBeforeClamp,
+                      afterClamp: benchHpAfterClamp,
+                      healing: benchHpAfterResolution - benchHpAfterClamp,
+                      maxHpBefore: benchMaxHpBefore,
+                      maxHpAfter: benched.maxHP,
+                      finalHp: benchHpAfterResolution,
+                      damageSource: 'quake_bench',
+                    }),
+                    maxHpCalculation: { maxHpBefore: benchMaxHpBefore, steps: [], maxHpAfter: benched.maxHP },
                   }),
                   defense: { triggered: false, reason: 'bench_damage_no_defense_check' },
                 }),
@@ -6010,7 +6667,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     push('log-winner', t('teamWin', winningTeam === 'A' ? t('teamA') : t('teamB'), aliveA, aliveB));
   }
 
-  return { winningTeam, teamA, teamB, idxA, idxB, log, snapshots, kongMatchupHp, analysisMode, analysisEvents };
+  return { winningTeam, teamA, teamB, idxA, idxB, log, snapshots, kongMatchupHp, analysisMode, debugFullSnapshot, analysisEvents };
 }
 
 // ===== チームビルダー =====
@@ -6439,12 +7096,73 @@ function formatDebugNumber(value) {
   return String(value);
 }
 
+function analysisEventPhase(event) {
+  if (event.hitType === 'status_tick') return 5;
+  if (event.eventType === 'action_start') return 10;
+  if (event.hitType === 'main' || event.hitType === 'combo' || event.hitType === 'combo_carryover' || event.hitType === 'quake_bench') return 50;
+  if (event.hitType === 'reflect') return 55;
+  if (event.hitType === 'counter') return 60;
+  if (event.eventType === 'status') return 70;
+  if (event.eventType === 'defeat' || event.eventType === 'entry') return 80;
+  return 40;
+}
+
+function orderedAnalysisEvents(events) {
+  return (events || []).map((event, index) => ({ event, index }))
+    .sort((a, b) =>
+      (a.event.actionNo || 0) - (b.event.actionNo || 0) ||
+      (a.event.matchupNo || 0) - (b.event.matchupNo || 0) ||
+      analysisEventPhase(a.event) - analysisEventPhase(b.event) ||
+      a.index - b.index
+    )
+    .map(item => item.event);
+}
+
+function appendBreakdownRows(rows, title, breakdown) {
+  rows.push(`${title}:`);
+  (breakdown?.length ? breakdown : [{ source: 'base', operation: 'set', value: 1 }]).forEach(part => {
+    const before = part.before != null ? ` before ${formatDebugNumber(part.before)}` : '';
+    const after = part.after != null ? ` after ${formatDebugNumber(part.after)}` : '';
+    rows.push(`  ${part.source || 'unknown'} ${part.operation || 'set'} ${formatDebugNumber(part.value)}${before}${after}`);
+  });
+}
+
+function appendCheckRows(rows, title, check) {
+  if (!check) return;
+  rows.push(`${title}:`);
+  rows.push(`  result: ${check.result || 'null'}${check.reason ? ' / reason ' + check.reason : ''}`);
+  (check.checks || []).forEach(item => {
+    const actual = item.actual !== undefined ? ` actual=${formatDebugNumber(item.actual)}` : '';
+    const required = item.required !== undefined ? ` required=${formatDebugNumber(item.required)}` : '';
+    rows.push(`  ${item.condition}: ${item.passed ? 'pass' : 'fail'}${actual}${required}`);
+  });
+}
+
+function appendStepRows(rows, title, steps) {
+  if (!steps?.length) return;
+  rows.push(`${title}:`);
+  steps.forEach(step => {
+    const order = step.order != null ? `[${step.order}] ` : '';
+    if (step.expression) {
+      const result = step.after !== undefined ? ` = ${formatDebugNumber(step.after)}` : '';
+      rows.push(`  ${order}${step.label}: ${step.expression}${result}`);
+    } else {
+      const value = step.value !== undefined ? ` value ${formatDebugNumber(step.value)}` : '';
+      const delta = step.delta !== undefined ? ` delta ${formatDebugNumber(step.delta)}` : '';
+      const before = step.before !== undefined ? ` before ${formatDebugNumber(step.before)}` : '';
+      const after = step.after !== undefined ? ` after ${formatDebugNumber(step.after)}` : '';
+      rows.push(`  ${order}${step.label}:${value}${before}${delta}${after}`);
+    }
+  });
+}
+
 function appendDebugCalculationRows(rows, event) {
   const debug = event.debugCalculation;
   if (!debug) return;
   if (debug.damage) {
     const d = debug.damage;
     rows.push('damage calculation:');
+    if (d.formula) rows.push(`  formula: ${d.formula}`);
     rows.push(`  attacker attack: ${formatDebugNumber(d.attackerAttack)}`);
     rows.push(`  defender durability: ${formatDebugNumber(d.defenderDurability)}`);
     rows.push(`  base damage: ${formatDebugNumber(d.baseDamage)}`);
@@ -6456,7 +7174,11 @@ function appendDebugCalculationRows(rows, event) {
     rows.push(`  raw final damage: ${formatDebugNumber(d.valueBeforeRounding)}`);
     rows.push(`  rounding: ${d.roundingMethod || 'null'}`);
     rows.push(`  final damage: ${formatDebugNumber(d.finalDamage)}`);
-    if (d.steps?.length) rows.push(`  steps: ${JSON.stringify(d.steps)}`);
+    if (d.skillCalculation) rows.push(`  skill calculation: ${JSON.stringify(d.skillCalculation)}`);
+    if (d.rng) rows.push(`  rng: ${JSON.stringify(d.rng)}`);
+    appendBreakdownRows(rows, 'damage bonus breakdown', d.damageBonusBreakdown);
+    appendBreakdownRows(rows, 'defense multiplier breakdown', d.defenseMultiplierBreakdown);
+    appendStepRows(rows, 'damage steps', d.steps);
   }
   if (debug.hp) {
     const h = debug.hp;
@@ -6470,6 +7192,8 @@ function appendDebugCalculationRows(rows, event) {
     rows.push(`  max hp after: ${formatDebugNumber(h.maxHpAfter)}`);
     rows.push(`  final hp: ${formatDebugNumber(h.finalHp)}`);
     rows.push(`  lethal: ${h.lethal === null ? 'null' : !!h.lethal}`);
+    appendStepRows(rows, 'hp steps', h.steps);
+    if (h.maxHpCalculation) rows.push(`max hp calculation: ${JSON.stringify(h.maxHpCalculation)}`);
   }
   if (debug.defense) {
     const def = debug.defense;
@@ -6487,7 +7211,10 @@ function appendDebugCalculationRows(rows, event) {
     rows.push(`  heal: ${formatDebugNumber(def.purify?.heal ?? null)}`);
     rows.push(`  counter reserved before lethal resolution: ${def.counterReservedBeforeLethalResolution === true || event.damage?.counterReservedBeforeLethalResolution === true}`);
     if (def.purify) rows.push(`  purify: ${JSON.stringify(def.purify)}`);
+    appendCheckRows(rows, 'defense skill checks', def.check || debug.defenseSkillCheck);
   }
+  appendCheckRows(rows, 'attack skill checks', debug.attackSkillCheck || event.attackSkill?.check);
+  appendCheckRows(rows, 'defense skill checks', debug.defenseSkillCheck || event.defense?.check);
   const rageGroups = debug.rage;
   if (rageGroups) {
     rows.push('rage calculation:');
@@ -6511,6 +7238,10 @@ function appendDebugCalculationRows(rows, event) {
   if (debug.status) {
     rows.push('status calculation:');
     rows.push(`  ${JSON.stringify(debug.status)}`);
+  }
+  if (debug.statusChanges?.length) {
+    rows.push('status changes:');
+    debug.statusChanges.forEach(change => rows.push(`  ${JSON.stringify(change)}`));
   }
 }
 
@@ -6567,13 +7298,13 @@ function buildAnalysisText(result, mode) {
     `events: ${(result.analysisEvents || []).length}`,
     '',
   ].join('\n');
-  return header + (result.analysisEvents || []).map(event => formatAnalysisEventText(event, developer, includeCalculation)).join('\n\n');
+  return header + orderedAnalysisEvents(result.analysisEvents || []).map(event => formatAnalysisEventText(event, developer, includeCalculation)).join('\n\n');
 }
 
 function renderAnalysisEvents(result, mode) {
   const developer = mode === 'developer';
   const includeCalculation = developer || analysisCalculationDetailEnabled();
-  const events = result.analysisEvents || [];
+  const events = orderedAnalysisEvents(result.analysisEvents || []);
   if (!events.length) return '<div class="placeholder">解析イベントはありません</div>';
   return events.map((event, idx) => {
     const actor = event.actor ? `${event.actor.team}${event.actor.index + 1}:${event.actor.name}` : '-';
@@ -6621,8 +7352,9 @@ function downloadJsonAnalysisLog() {
   if (!LAST_BATTLE_RESULT) return;
   const json = JSON.stringify({
     analysisMode: LAST_BATTLE_RESULT.analysisMode,
+    debugFullSnapshot: !!LAST_BATTLE_RESULT.debugFullSnapshot,
     winningTeam: LAST_BATTLE_RESULT.winningTeam,
-    events: LAST_BATTLE_RESULT.analysisEvents || [],
+    events: orderedAnalysisEvents(LAST_BATTLE_RESULT.analysisEvents || []),
   }, null, 2);
   const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
   const url = URL.createObjectURL(blob);
