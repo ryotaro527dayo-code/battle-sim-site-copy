@@ -974,6 +974,10 @@
     <input type="checkbox" id="analysisCalculationDetailToggle" onchange="renderLastBattleLog()">
     詳細計算ログ
   </label>
+  <label class="analysis-calc-toggle">
+    <input type="checkbox" id="debugFullSnapshotToggle">
+    チーム全体の状態をログに保存
+  </label>
   <button type="button" id="copyAnalysisLogBtn" onclick="copyAnalysisLog()" disabled>ログ全文をコピー</button>
   <button type="button" id="downloadHumanLogBtn" onclick="downloadHumanAnalysisLog()" disabled>TXT保存</button>
   <button type="button" id="downloadJsonLogBtn" onclick="downloadJsonAnalysisLog()" disabled>JSON保存</button>
@@ -7072,6 +7076,13 @@ function selectedAnalysisMode() {
   return document.getElementById('analysisModeSelect')?.value || 'normal';
 }
 
+function battleAnalysisOptions() {
+  return {
+    analysisMode: selectedAnalysisMode(),
+    debugFullSnapshot: document.getElementById('debugFullSnapshotToggle')?.checked === true,
+  };
+}
+
 function analysisFileBase(result) {
   const d = new Date();
   const pad = n => String(n).padStart(2, '0');
@@ -7417,8 +7428,7 @@ function startBattle6v6() {
   const tdA = getTeamData('A');
   const tdB = getTeamData('B');
   if (!tdA.length || !tdB.length) { alert(t('needTeams')); return; }
-  const mode = selectedAnalysisMode();
-  const result = simulateBattle6v6(tdA, tdB, true, { analysisMode: mode });
+  const result = simulateBattle6v6(tdA, tdB, true, battleAnalysisOptions());
   if (!result) return;
   LAST_BATTLE_RESULT = result;
   LAST_SHARE_TEXT = buildBattleShareText(result);
