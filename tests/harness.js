@@ -61,7 +61,7 @@ return {
   SLOT_STAT,
   OCR_CHAR_IDS,
   ENABLE_QUAKE_HARDEN_LINK_BUG,
-  SEAL_BLOCKS_DEFENSE_RAGE_SKILLS,
+  SKILL_SEAL_BLOCKS_DEFENSE_SKILLS,
   getUniqueOcrCharIds,
   buildOcrCharOptions,
   defaultSkillLevels,

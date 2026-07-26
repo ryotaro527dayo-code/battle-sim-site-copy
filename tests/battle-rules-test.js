@@ -35,20 +35,68 @@ const app = loadBattleSim();
 }
 
 {
-  assert.strictEqual(app.SEAL_BLOCKS_DEFENSE_RAGE_SKILLS, true, 'provisional seal defense block should be isolated behind a flag');
+  assert.strictEqual(app.SKILL_SEAL_BLOCKS_DEFENSE_SKILLS, true, 'skill seal must block every defense skill');
 
-  const weakUser = beast('test_seal_blocks_defense_user', 'Seal Blocks Defense User', { agi: 200, atk: 1000, dur: 1000, will: 67 }, [
-    { name: '攻撃-虚弱', type: 'attack', rageCost: 0, effect: 'weak', param: 0.25, param2: 2 },
-  ]);
-  const sealedCounter = beast('test_sealed_counter_target', 'Sealed Counter Target', { agi: 100, atk: 1, dur: 450, will: 66 }, [
-    { name: '防御-反撃', type: 'defense', rageCost: 0, effect: 'counter', param: 0.25 },
-  ]);
+  const cases = [
+    { effect: 'counter', name: '防御-反撃', param: 0.25, readyStatus: 'counterReady' },
+    { effect: 'harden', name: '防御-硬化皮膚', param: 0.35, readyStatus: 'hardenReady' },
+    { effect: 'def_dodge', name: '防御-回避', param: 0.60, readyStatus: 'defDodgeReady' },
+  ];
 
-  const result = app.simulateBattle6v6([weakUser], [sealedCounter], true);
-  const logText = result.log.map(row => row.msg).join('\n');
-  const counterUses = (logText.match(/が【防御-反撃】を発動/g) || []).length;
+  for (const defenseCase of cases) {
+    const weakUser = beast(`test_seal_user_${defenseCase.effect}`, `Seal User ${defenseCase.effect}`, {
+      agi: 200, atk: 10, dur: 2000, will: 67,
+    }, [
+      { name: '攻撃-虚弱', type: 'attack', rageCost: 20, effect: 'weak', param: 0.25, param2: 2 },
+    ]);
+    const sealedDefender = beast(`test_sealed_${defenseCase.effect}`, `Sealed ${defenseCase.effect}`, {
+      agi: 100, atk: 1, dur: 2000, will: 66,
+    }, [
+      { name: defenseCase.name, type: 'defense', rageCost: 30, effect: defenseCase.effect, param: defenseCase.param },
+    ]);
 
-  assert.strictEqual(counterUses, 1, 'sealed defender should not activate defense rage skill while provisional rule is enabled');
+    const result = app.withSeededRandom(777, () =>
+      app.simulateBattle6v6([weakUser], [sealedDefender], true, { analysisMode: 'developer' })
+    );
+    const targetId = sealedDefender.id;
+    const targetHits = result.analysisEvents.filter(event =>
+      event.eventType === 'hit' &&
+      event.hitType === 'main' &&
+      event.target?.beastId === targetId
+    );
+    const sealedHit = targetHits.find(event =>
+      event.stateBefore?.target?.statuses?.skillSealTurns > 0 &&
+      event.defense?.reason === 'sealed'
+    );
+
+    assert(sealedHit, `${defenseCase.effect}: sealed defense skip must be logged`);
+    assert.strictEqual(sealedHit.defense.triggered, false, `${defenseCase.effect}: sealed defense skill must not trigger`);
+    assert.strictEqual(
+      sealedHit.defense.rageAfter,
+      sealedHit.defense.rageBefore,
+      `${defenseCase.effect}: sealed defense skill must preserve defense rage`
+    );
+    assert.strictEqual(
+      sealedHit.stateAfter.target.statuses[defenseCase.readyStatus],
+      false,
+      `${defenseCase.effect}: sealed defense effect must not be reserved`
+    );
+    const sealCheck = sealedHit.defense.check.checks.find(check => check.condition === 'not_sealed');
+    assert(sealCheck && sealCheck.passed === false, `${defenseCase.effect}: defense check must record sealed`);
+
+    const postSealTrigger = targetHits.find(event =>
+      event.actionNo > sealedHit.actionNo &&
+      event.stateBefore?.target?.statuses?.skillSealTurns === 0 &&
+      event.defense?.triggered === true &&
+      event.defense?.skillId === defenseCase.effect
+    );
+    assert(postSealTrigger, `${defenseCase.effect}: defense skill must trigger at the next eligible opportunity after seal expires`);
+    assert.strictEqual(
+      postSealTrigger.defense.rageAfterConsume,
+      postSealTrigger.defense.rageBefore - 30,
+      `${defenseCase.effect}: rage must be consumed only after the seal expires`
+    );
+  }
 }
 
 {
