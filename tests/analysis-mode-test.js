@@ -114,6 +114,11 @@ for (const result of [detail, developer]) {
   assert(result.events.some(e => e.eventType === 'hit' && e.hitIndex === 2), 'combo second hit should be a separate event');
   assert(result.events.some(e => e.defense && Object.prototype.hasOwnProperty.call(e.defense, 'triggered')), 'defense decision should be recorded');
   assert(result.events.some(e => e.damage && typeof e.damage.displayed === 'number'), 'damage should be recorded');
+  const calculatedHit = result.events.find(e => e.eventType === 'hit' && e.damage && e.debugCalculation);
+  assert(calculatedHit, 'hit events should include structured debugCalculation data');
+  assert.strictEqual(typeof calculatedHit.debugCalculation.damage.finalDamage, 'number', 'debugCalculation should record final damage');
+  assert.strictEqual(typeof calculatedHit.debugCalculation.hp.hpBefore, 'number', 'debugCalculation should record HP before damage');
+  assert(calculatedHit.debugCalculation.rage, 'debugCalculation should record rage calculation context');
 }
 
 assert.deepStrictEqual(
