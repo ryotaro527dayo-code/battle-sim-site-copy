@@ -4306,9 +4306,7 @@ class Fighter {
     this.hardenReady = false;
     this.hardenSource = null;
     this.attackCount = 0;
-    this.agiDebuffAttacksLeft = 0;
-    this.agiDebuffAmount = 0;
-    this.slowEffect = null;
+    this.slowEffects = [];
     this.attackRageBonus = 0;
     this.rapidAtkPenalty = 0;
     this.entryAtkBonus = 0;
@@ -4424,7 +4422,8 @@ class Fighter {
   }
 
   getAGI() {
-    return Math.max(1, this.agi - (this.poisonStacks || 0));
+    const slowAgiDown = this.slowEffects.reduce((sum, effect) => sum + effect.agiDown, 0);
+    return Math.max(1, this.agi - slowAgiDown - (this.poisonStacks || 0));
   }
 
   getActiveAttackSkill() {
@@ -4470,6 +4469,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
   let matchupNo = 0;
   let currentActionMeta = null;
   let currentRandomLog = null;
+  let slowEffectSequence = 0;
 
   const fighterSide = (fighter) => teamA.includes(fighter) ? 'A' : teamB.includes(fighter) ? 'B' : '?';
   const fighterIndex = (fighter) => fighterSide(fighter) === 'A' ? teamA.indexOf(fighter) : teamB.indexOf(fighter);
@@ -4493,12 +4493,13 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       skillSealTurns: fighter.skillSealTurns || 0,
       damageBonusTurns: fighter.damageBonusTurns || 0,
       lacerateTurns: fighter.lacerateTurns || 0,
-      agiDebuffAttacksLeft: fighter.agiDebuffAttacksLeft || 0,
-      slowEffect: fighter.slowEffect ? {
-        sourceInstanceId: fighter.slowEffect.sourceInstanceId,
-        targetInstanceId: fighter.slowEffect.targetInstanceId,
-        attacksUntilRemoval: fighter.slowEffect.attacksUntilRemoval,
-      } : null,
+      slowEffects: fighter.slowEffects.map(effect => ({
+        id: effect.id,
+        sourceInstanceId: effect.sourceInstanceId,
+        targetInstanceId: effect.targetInstanceId,
+        attacksUntilRemoval: effect.attacksUntilRemoval,
+        agiDown: effect.agiDown,
+      })),
       backwaterHitsLeft: fighter.backwaterHitsLeft || 0,
       hardenReady: !!fighter.hardenReady,
       toxicSkinReady: !!fighter.toxicSkinReady,
@@ -5193,14 +5194,10 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       const hpBeforePurify = def.hp;
       const maxHpBeforePurify = def.maxHP;
       if (def.damageBonusTurns > 0) { def.damageBonusTurns = Math.max(0, def.damageBonusTurns - 2); removed++; }
-      if (def.agiDebuffAttacksLeft > 0) {
-        def.agiDebuffAttacksLeft = Math.max(0, def.agiDebuffAttacksLeft - 2);
-        if (def.slowEffect) def.slowEffect.attacksUntilRemoval = def.agiDebuffAttacksLeft;
-        if (def.agiDebuffAttacksLeft === 0) {
-          def.agi += def.agiDebuffAmount;
-          def.agiDebuffAmount = 0;
-          def.slowEffect = null;
-        }
+      if (def.slowEffects.length > 0) {
+        const purifyTarget = def.slowEffects[0];
+        purifyTarget.attacksUntilRemoval = Math.max(0, purifyTarget.attacksUntilRemoval - 2);
+        def.slowEffects = def.slowEffects.filter(effect => effect.attacksUntilRemoval > 0);
         removed++;
       }
       if (def.lacerateTurns > 0) { def.lacerateTurns = Math.max(0, def.lacerateTurns - 2); removed++; }
@@ -5228,44 +5225,55 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       if (atk.weakAtkTurns > 0) atk.weakAtkTurns = Math.max(0, atk.weakAtkTurns - 1);
     };
     const decrementTargetSlowAfterAttack = (attacker, target) => {
-      const effect = target.slowEffect;
-      const attackerOwnEffect = attacker.slowEffect;
-      const loggedEffect = effect || attackerOwnEffect;
-      const attacksUntilRemovalBefore = loggedEffect?.attacksUntilRemoval ?? 0;
+      const targetEffectsBefore = target.slowEffects.map(effect => ({ ...effect }));
+      const attackerOwnEffects = attacker.slowEffects.map(effect => ({ ...effect }));
+      const matchingEffects = target.slowEffects.filter(effect =>
+        attacker.instanceId === effect.sourceInstanceId &&
+        target.instanceId === effect.targetInstanceId
+      );
+      const loggedEffects = matchingEffects.length
+        ? matchingEffects
+        : targetEffectsBefore.length
+          ? targetEffectsBefore
+          : attackerOwnEffects;
+      const oldEffectiveAgi = target.getAGI();
       const debug = {
-        slowSourceInstanceId: loggedEffect?.sourceInstanceId ?? null,
-        slowTargetInstanceId: loggedEffect?.targetInstanceId ?? null,
-        attacksUntilRemovalBefore,
-        attacksUntilRemovalAfter: attacksUntilRemovalBefore,
+        slowSourceInstanceId: matchingEffects[0]?.sourceInstanceId ?? targetEffectsBefore[0]?.sourceInstanceId ?? attackerOwnEffects[0]?.sourceInstanceId ?? null,
+        slowTargetInstanceId: matchingEffects[0]?.targetInstanceId ?? targetEffectsBefore[0]?.targetInstanceId ?? attackerOwnEffects[0]?.targetInstanceId ?? null,
+        attacksUntilRemovalBefore: loggedEffects.map(effect => effect.attacksUntilRemoval),
+        attacksUntilRemovalAfter: loggedEffects.map(effect => effect.attacksUntilRemoval),
+        slowEffectsBefore: targetEffectsBefore,
+        slowEffectsAfter: targetEffectsBefore,
+        decrementedEffectIds: [],
+        removedEffectIds: [],
         decrementTriggered: false,
-        decrementReason: effect
-          ? 'source_or_target_instance_mismatch'
-          : attackerOwnEffect
+        decrementReason: targetEffectsBefore.length
+          ? 'attacker_not_slow_source'
+          : attackerOwnEffects.length
             ? 'slowed_target_own_action_does_not_decrement'
             : 'no_active_slow',
       };
-      if (!effect) return debug;
-      if (attacker.instanceId !== effect.sourceInstanceId) {
-        debug.decrementReason = 'attacker_not_slow_source';
-        return debug;
-      }
-      if (target.instanceId !== effect.targetInstanceId) {
-        debug.decrementReason = 'target_not_slow_target';
-        return debug;
-      }
+      if (!matchingEffects.length) return debug;
 
-      effect.attacksUntilRemoval = Math.max(0, effect.attacksUntilRemoval - 1);
-      target.agiDebuffAttacksLeft = effect.attacksUntilRemoval;
-      debug.attacksUntilRemovalAfter = effect.attacksUntilRemoval;
+      matchingEffects.forEach(effect => {
+        effect.attacksUntilRemoval = Math.max(0, effect.attacksUntilRemoval - 1);
+      });
+      debug.decrementedEffectIds = matchingEffects.map(effect => effect.id);
+      debug.removedEffectIds = matchingEffects
+        .filter(effect => effect.attacksUntilRemoval === 0)
+        .map(effect => effect.id);
+      target.slowEffects = target.slowEffects.filter(effect => effect.attacksUntilRemoval > 0);
+      debug.attacksUntilRemovalAfter = matchingEffects.map(effect => effect.attacksUntilRemoval);
+      debug.slowEffectsAfter = target.slowEffects.map(effect => ({ ...effect }));
       debug.decrementTriggered = true;
-      debug.decrementReason = effect.attacksUntilRemoval === 0
-        ? 'matching_source_target_attack_slow_expired'
+      debug.decrementReason = debug.removedEffectIds.length
+        ? 'matching_source_target_attack_slow_effect_removed'
         : 'matching_source_target_attack';
-
-      if (effect.attacksUntilRemoval === 0) {
-        target.agi += target.agiDebuffAmount;
-        target.agiDebuffAmount = 0;
-        target.slowEffect = null;
+      const newEffectiveAgi = target.getAGI();
+      if (analysisEnabled) {
+        Object.assign(debug, describePreservedActionProgress(target, oldEffectiveAgi, newEffectiveAgi));
+      }
+      if (debug.removedEffectIds.length) {
         push('log-buff', t('speedDebuffEnd', fighterName(target)));
       }
       return debug;
@@ -5324,7 +5332,6 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       ref: fighterRef(f),
       weakAtkTurns: f.weakAtkTurns || 0,
       skillSealTurns: f.skillSealTurns || 0,
-      agiDebuffAttacksLeft: f.agiDebuffAttacksLeft || 0,
     }));
     [atk, def].forEach(f => {
       if (f.skillSealTurns > 0) f.skillSealTurns = Math.max(0, f.skillSealTurns - 1);
@@ -5335,12 +5342,9 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       weakAtkTurnsAfter: before.fighter.weakAtkTurns || 0,
       skillSealTurnsBefore: before.skillSealTurns,
       skillSealTurnsAfter: before.fighter.skillSealTurns || 0,
-      agiDebuffAttacksLeftBefore: before.agiDebuffAttacksLeft,
-      agiDebuffAttacksLeftAfter: before.fighter.agiDebuffAttacksLeft || 0,
     })).filter(change =>
       change.weakAtkTurnsBefore !== change.weakAtkTurnsAfter ||
-      change.skillSealTurnsBefore !== change.skillSealTurnsAfter ||
-      change.agiDebuffAttacksLeftBefore !== change.agiDebuffAttacksLeftAfter
+      change.skillSealTurnsBefore !== change.skillSealTurnsAfter
     );
     const statusTickChangeEvents = statusTickChanges.flatMap(change => {
       const events = [];
@@ -5363,17 +5367,6 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           delta: change.weakAtkTurnsAfter - change.weakAtkTurnsBefore,
           after: change.weakAtkTurnsAfter,
           reason: change.weakAtkTurnsAfter === 0 ? 'expired' : 'turn_consumed',
-          timing: 'action_start',
-        });
-      }
-      if (change.agiDebuffAttacksLeftBefore !== change.agiDebuffAttacksLeftAfter) {
-        events.push({
-          status: 'agiDebuffAttacksLeft',
-          target: change.fighter,
-          before: change.agiDebuffAttacksLeftBefore,
-          delta: change.agiDebuffAttacksLeftAfter - change.agiDebuffAttacksLeftBefore,
-          after: change.agiDebuffAttacksLeftAfter,
-          reason: change.agiDebuffAttacksLeftAfter === 0 ? 'expired' : 'turn_consumed',
           timing: 'action_start',
         });
       }
@@ -6193,14 +6186,15 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         const slowStateBefore = { actor: fighterState(atk), target: fighterState(def) };
         const agiDown = Math.round(def.getAGI() * slowRate);
         const agiBeforeSlow = def.getAGI();
-        def.agi = Math.max(1, def.agi - agiDown);
-        def.agiDebuffAttacksLeft = 2;
-        def.agiDebuffAmount += agiDown;
-        def.slowEffect = {
+        const slowEffectsBefore = def.slowEffects.map(effect => ({ ...effect }));
+        const newSlowEffect = {
+          id: `slow-${++slowEffectSequence}`,
           sourceInstanceId: atk.instanceId,
           targetInstanceId: def.instanceId,
-          attacksUntilRemoval: def.agiDebuffAttacksLeft,
+          attacksUntilRemoval: 2,
+          agiDown,
         };
+        def.slowEffects.push(newSlowEffect);
         const slowActionProgress = analysisEnabled
           ? describePreservedActionProgress(def, agiBeforeSlow, def.getAGI())
           : null;
@@ -6224,11 +6218,13 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               agiBefore: agiBeforeSlow,
               agiDown,
               agiAfter: def.getAGI(),
-              remainingAttacks: def.agiDebuffAttacksLeft,
-              slowSourceInstanceId: def.slowEffect.sourceInstanceId,
-              slowTargetInstanceId: def.slowEffect.targetInstanceId,
-              attacksUntilRemovalBefore: 0,
-              attacksUntilRemovalAfter: def.slowEffect.attacksUntilRemoval,
+              slowEffectId: newSlowEffect.id,
+              slowSourceInstanceId: newSlowEffect.sourceInstanceId,
+              slowTargetInstanceId: newSlowEffect.targetInstanceId,
+              attacksUntilRemovalBefore: [],
+              attacksUntilRemovalAfter: def.slowEffects.map(effect => effect.attacksUntilRemoval),
+              slowEffectsBefore,
+              slowEffectsAfter: def.slowEffects.map(effect => ({ ...effect })),
               decrementTriggered: false,
               decrementReason: 'slow_applied',
               ...(slowActionProgress || {}),
@@ -6246,13 +6242,13 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
                 timing: 'skill_effect',
               },
               {
-                status: 'agiDebuffAttacksLeft',
+                status: 'slowEffects',
                 sourceSkill: skillName(atkSkill),
                 applier: fighterRef(atk),
                 target: fighterRef(def),
-                before: 0,
-                delta: def.agiDebuffAttacksLeft,
-                after: def.agiDebuffAttacksLeft,
+                before: slowEffectsBefore,
+                added: { ...newSlowEffect },
+                after: def.slowEffects.map(effect => ({ ...effect })),
                 reason: 'skill_applied',
                 timing: 'skill_effect',
               },
