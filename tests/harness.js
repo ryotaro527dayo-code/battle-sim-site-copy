@@ -58,6 +58,9 @@ function loadBattleSim() {
 return {
   CHARS,
   Fighter,
+  SpeedModifierType,
+  ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE,
+  DEFAULT_ACTION_GAUGE_SPEED_MODIFIER_ENABLED,
   TEAM_SEL,
   SLOT_STAT,
   OCR_CHAR_IDS,

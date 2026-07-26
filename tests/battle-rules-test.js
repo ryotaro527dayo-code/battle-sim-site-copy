@@ -346,11 +346,65 @@ const app = loadBattleSim();
     { id: 'slow-a', sourceInstanceId: 'A-0', targetInstanceId: 'B-test', attacksUntilRemoval: 1, agiDown: 50 },
     { id: 'slow-b', sourceInstanceId: 'A-0', targetInstanceId: 'B-test', attacksUntilRemoval: 2, agiDown: 50 },
   ];
-  assert.strictEqual(fighter.getAGI(), 100, 'two active 50-point slow effects must reduce AGI by 100');
+  assert.strictEqual(fighter.getDisplayAGI(), 100, 'two active 50-point slow effects must reduce display AGI by 100');
   fighter.slowEffects = fighter.slowEffects.filter(effect => effect.id !== 'slow-a');
-  assert.strictEqual(fighter.getAGI(), 150, 'removing one effect must restore only its own 50 AGI');
+  assert.strictEqual(fighter.getDisplayAGI(), 150, 'removing one effect must restore only its own 50 display AGI');
   fighter.slowEffects = [];
-  assert.strictEqual(fighter.getAGI(), 200, 'removing all effects must restore original AGI');
+  assert.strictEqual(fighter.getDisplayAGI(), 200, 'removing all effects must restore original display AGI');
+}
+
+{
+  assert.strictEqual(
+    app.ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE,
+    true,
+    'attack-skill speed must affect the action gauge by default for backward compatibility'
+  );
+
+  const slowSource = beast('test_speed_mode_source', 'Speed Mode Source', {
+    agi: 180, atk: 1, dur: 1000, will: 1,
+  }, [
+    { name: '攻撃-減速', type: 'attack', rageCost: 0, effect: 'slow', param: 0.50 },
+  ]);
+  const slowTarget = beast('test_speed_mode_target', 'Speed Mode Target', {
+    agi: 100, atk: 1, dur: 1000, will: 1,
+  }, []);
+
+  const run = attackSkillSpeedAffectsActionGauge => app.withSeededRandom(1122, () =>
+    app.simulateBattle6v6(
+      [slowSource],
+      [slowTarget],
+      true,
+      { analysisMode: 'developer', attackSkillSpeedAffectsActionGauge }
+    )
+  );
+  const gaugeOn = run(true);
+  const gaugeOff = run(false);
+  const onActions = gaugeOn.analysisEvents.filter(event => event.eventType === 'action_start');
+  const offActions = gaugeOff.analysisEvents.filter(event => event.eventType === 'action_start');
+  const onSlow = gaugeOn.analysisEvents.find(event => event.eventType === 'status' && event.skillId === 'slow');
+  const offSlow = gaugeOff.analysisEvents.find(event => event.eventType === 'status' && event.skillId === 'slow');
+
+  assert.strictEqual(onSlow.stateAfter.target.agi, 50, 'gauge ON must apply slow to display AGI');
+  assert.strictEqual(offSlow.stateAfter.target.agi, 50, 'gauge OFF must still apply slow to display AGI');
+  assert.strictEqual(onSlow.debugCalculation.status.actionGaugeAgiAfter, 50, 'gauge ON must use slowed AGI for action timing');
+  assert.strictEqual(offSlow.debugCalculation.status.actionGaugeAgiAfter, 100, 'gauge OFF must exclude attack-skill slow from action timing');
+  assert.strictEqual(onActions[1].actor.beastId, slowSource.id, 'gauge ON must delay the slowed target');
+  assert.strictEqual(offActions[1].actor.beastId, slowTarget.id, 'gauge OFF must preserve the target action-gauge speed');
+  assert.strictEqual(
+    gaugeOff.actionGaugeSpeedModifierEnabled[app.SpeedModifierType.ATTACK_SKILL],
+    false,
+    'result must expose the action-gauge speed policy used for the battle'
+  );
+
+  const rapidFighter = new app.Fighter(
+    beast('test_warcry_speed_mode', 'Warcry Speed Mode', { agi: 100, atk: 1, dur: 1000, will: 1 }, [
+      { name: '戦吼-急速', type: 'battlecry', effect: 'rapid', param: 0.12, param2: 0.08 },
+    ]),
+    'A-rapid',
+    { [app.SpeedModifierType.ATTACK_SKILL]: false }
+  );
+  assert.strictEqual(rapidFighter.getDisplayAGI(), 112, 'warcry speed must affect display AGI');
+  assert.strictEqual(rapidFighter.getActionGaugeAGI(), 112, 'warcry speed must always affect action-gauge AGI');
 }
 
 {
