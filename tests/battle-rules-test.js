@@ -120,6 +120,101 @@ const app = loadBattleSim();
 }
 
 {
+  const slowUser = beast('test_slow_progress_user', 'Slow Progress User', {
+    agi: 200, atk: 1, dur: 1000, will: 1,
+  }, [
+    { name: '攻撃-減速', type: 'attack', rageCost: 0, effect: 'slow', param: 0.50 },
+  ]);
+  const slowTarget = beast('test_slow_progress_target', 'Slow Progress Target', {
+    agi: 150, atk: 1, dur: 1000, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(321, () =>
+    app.simulateBattle6v6([slowUser], [slowTarget], true, { analysisMode: 'developer' })
+  );
+  const actions = result.analysisEvents.filter(event => event.eventType === 'action_start');
+  const slowStatus = result.analysisEvents.find(event =>
+    event.eventType === 'status' &&
+    event.skillId === 'slow' &&
+    event.target?.beastId === slowTarget.id
+  );
+
+  assert.strictEqual(actions[0].actor.beastId, slowUser.id, 'faster slow user should act first');
+  assert.strictEqual(
+    actions[1].actor.beastId,
+    slowTarget.id,
+    'slow target must keep its accumulated action progress and act next'
+  );
+  assert(slowStatus, 'slow application must produce an analysis status event');
+  const progress = slowStatus.debugCalculation.status;
+  assert.strictEqual(progress.oldEffectiveAgi, 150, 'slow log must record effective AGI before application');
+  assert.strictEqual(progress.newEffectiveAgi, 75, 'slow log must record effective AGI after application');
+  assert.strictEqual(progress.actionGauge, 750, 'slow must preserve the action gauge accumulated before application');
+  assert.strictEqual(progress.actionProgressPreserved, true, 'slow log must mark action progress as preserved');
+  assert(Math.abs(progress.oldInterval - (1000 / 150)) < 1e-12, 'slow log must record the old interval');
+  assert(Math.abs(progress.oldRemainingTime - (250 / 150)) < 1e-12, 'slow log must record old remaining time');
+  assert(Math.abs(progress.progressRatio - 0.75) < 1e-12, 'slow log must record the preserved progress ratio');
+  assert(Math.abs(progress.newInterval - (1000 / 75)) < 1e-12, 'slow log must record the new interval');
+  assert(Math.abs(progress.newRemainingTime - (250 / 75)) < 1e-12, 'slow log must derive new remaining time from preserved progress');
+}
+
+{
+  const firstAttacker = beast('test_progress_reset_first', 'Progress Reset First', {
+    agi: 200, atk: 1, dur: 10, will: 1,
+  }, []);
+  const replacement = beast('test_progress_reset_replacement', 'Progress Reset Replacement', {
+    agi: 150, atk: 1, dur: 1000, will: 1,
+  }, []);
+  const counterSurvivor = beast('test_progress_reset_survivor', 'Progress Reset Survivor', {
+    agi: 100, atk: 400, dur: 1000, will: 1,
+  }, [
+    { name: '防御-反撃', type: 'defense', rageCost: 0, effect: 'counter', param: 0.25 },
+  ]);
+
+  const result = app.withSeededRandom(654, () =>
+    app.simulateBattle6v6([firstAttacker, replacement], [counterSurvivor], true, { analysisMode: 'detail' })
+  );
+  const actions = result.analysisEvents.filter(event => event.eventType === 'action_start');
+
+  assert.strictEqual(actions[0].actor.beastId, firstAttacker.id, 'first attacker should act before the counter survivor');
+  assert.strictEqual(result.teamA[0].hp, 0, 'counter must defeat the first attacker');
+  assert.strictEqual(
+    actions[1].actor.beastId,
+    replacement.id,
+    'death and entry must reset both action gauges instead of preserving the survivor progress'
+  );
+}
+
+{
+  const active = beast('test_entry_effective_agi_active', 'Entry Effective AGI Active', {
+    agi: 120, atk: 500, dur: 1000, will: 1,
+  }, []);
+  const defeated = beast('test_entry_effective_agi_defeated', 'Entry Effective AGI Defeated', {
+    agi: 50, atk: 1, dur: 1, will: 1,
+  }, []);
+  const rapidReplacement = beast('test_entry_effective_agi_rapid', 'Entry Effective AGI Rapid', {
+    agi: 110, atk: 1, dur: 1000, will: 1,
+  }, [
+    { name: '戦吼-急速', type: 'battlecry', effect: 'rapid', param: 0.12, param2: 0.08 },
+  ]);
+
+  const result = app.withSeededRandom(987, () =>
+    app.simulateBattle6v6([active], [defeated, rapidReplacement], true, { analysisMode: 'detail' })
+  );
+  const actions = result.analysisEvents.filter(event => event.eventType === 'action_start');
+
+  assert.strictEqual(actions[0].actor.beastId, active.id, 'active fighter should defeat the first opponent');
+  assert.strictEqual(rapidReplacement.agi, 110, 'test input should retain its base AGI');
+  assert.strictEqual(
+    actions[1].actor.beastId,
+    rapidReplacement.id,
+    'post-entry order must use effective AGI including rapid'
+  );
+  assert.strictEqual(actions[1].order.effectiveAgiB, 123, 'rapid replacement effective AGI must include the 12% speed bonus');
+  assert.strictEqual(actions[1].order.effectiveAgiA, 120, 'remaining fighter effective AGI must be recalculated after entry');
+}
+
+{
   assert.strictEqual(app.ENABLE_QUAKE_HARDEN_LINK_BUG, false, 'quake harden hidden reservation bug must stay disabled');
 
   const quakeUser = beast('test_quake_user', 'Quake User', { agi: 200, atk: 100, will: 999 }, [
