@@ -910,7 +910,7 @@
 <p class="subtitle" data-i18n="subtitle">サベージサバイバル 恐竜の咆哮 | 戦闘予測ツール</p>
 
 <div class="settings">
-  <span style="color:var(--text-dim);font-size:0.85rem" data-i18n="rageFormula">レイジ獲得量: 戦意 × 0.2649（キャラごとに自動計算）</span>
+  <span style="color:var(--text-dim);font-size:0.85rem" data-i18n="rageFormula">レイジ獲得量: floor((戦意 + 13) / 4)（キャラごとに自動計算）</span>
 </div>
 
 <div class="ocr-import">
@@ -1115,7 +1115,7 @@ const I18N = {
     language: '言語',
     appTitle: '猛獣バトルシミュレーター',
     subtitle: 'サベージサバイバル 恐竜の咆哮 | 戦闘予測ツール',
-    rageFormula: 'レイジ獲得量: 戦意 × 0.2649（キャラごとに自動計算）',
+    rageFormula: 'レイジ獲得量: floor((戦意 + 13) / 4)（キャラごとに自動計算）',
     ocrTitle: '画像から自動入力',
     ocrNote: '猛獣ステータス画面の画像を読み取り、確認後に選択中の枠へ反映します。',
     ocrIdle: '画像を選択してください。',
@@ -1274,7 +1274,7 @@ const I18N = {
     language: 'Language',
     appTitle: 'Beast Battle Simulator',
     subtitle: 'Savage Survival: Dinosaur Roar | Battle prediction tool',
-    rageFormula: 'Rage gain: Will × 0.2649 (calculated per character)',
+    rageFormula: 'Rage gain: floor((Will + 13) / 4) (calculated per character)',
     ocrTitle: 'Auto-fill from image',
     ocrNote: 'Read a beast status image and apply it to the selected slot after confirmation.',
     ocrIdle: 'Select an image.',
@@ -1432,7 +1432,7 @@ const I18N = {
     language: 'Язык',
     appTitle: 'Симулятор битвы зверей',
     subtitle: 'Savage Survival: Roar of Dinosaurs | Прогноз боя',
-    rageFormula: 'Ярость: воля × 0.2649 (расчет для каждого бойца)',
+    rageFormula: 'Ярость: floor((воля + 13) / 4) (расчет для каждого бойца)',
     ocrTitle: 'Автоввод по изображению',
     ocrNote: 'Считывает экран статуса и применяет к выбранному слоту после проверки.',
     ocrIdle: 'Выберите изображение.',
@@ -1590,7 +1590,7 @@ const I18N = {
     language: '语言',
     appTitle: '猛兽战斗模拟器',
     subtitle: 'Savage Survival: 恐龙咆哮 | 战斗预测工具',
-    rageFormula: '怒气获取量: 意志 × 0.2649（按角色自动计算）',
+    rageFormula: '怒气获取量: floor((意志 + 13) / 4)（按角色自动计算）',
     ocrTitle: '从图片自动输入',
     ocrNote: '读取猛兽状态图片，确认后填入所选位置。',
     ocrIdle: '请选择图片。',
@@ -1942,6 +1942,9 @@ function getParam(charOrData, effect, key, fallback) {
   }
   const k = charOrData + '.' + effect + '.' + key;
   return OVERRIDES[k] !== undefined ? OVERRIDES[k] : fallback;
+}
+function calcNormalRageGain(will) {
+  return Math.floor(((Number(will) || 0) + 13) / 4);
 }
 function setParam(charId, effect, key, val) {
   OVERRIDES[charId + '.' + effect + '.' + key] = val;
@@ -4893,7 +4896,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     consumeBackwaterHit(def);
     // 防御レイジ増加は通常攻撃を受けたときのみ（攻撃スキルのメインヒットでは増加しない）
     if (!atkSkill) {
-      const defRageGain = Math.max(0, Math.round(def.will * 0.2649) - (def.hasBattleCry('attack_talent') ? getParam(def.data, 'attack_talent', 'param', 3) : 0) + (def.hasBattleCry('defense_talent') ? getParam(def.data, 'defense_talent', 'param', 4) : 0));
+      const defRageGain = Math.max(0, calcNormalRageGain(def.will) - (def.hasBattleCry('attack_talent') ? getParam(def.data, 'attack_talent', 'param', 3) : 0) + (def.hasBattleCry('defense_talent') ? getParam(def.data, 'defense_talent', 'param', 4) : 0));
       const before = def.defRage;
       def.defRage = Math.min(def.maxRage, def.defRage + defRageGain);
       targetRageSteps.push({ label: 'normal_hit_defense_rage_gain', delta: def.defRage - before, requested: defRageGain, value: rageState(def) });
@@ -4927,7 +4930,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     }
     // 通常攻撃のみレイジ増加（レイジスキル使用時・回避でダメージなしの場合は増加しない）
     if (!atkSkill && !noRageGain) {
-      const rageGain = Math.max(0, Math.round(atk.will * 0.2649) + atk.attackRageBonus - (atk.hasBattleCry('defense_talent') ? getParam(atk.data, 'defense_talent', 'param2', 4) : 0));
+      const rageGain = Math.max(0, calcNormalRageGain(atk.will) + atk.attackRageBonus - (atk.hasBattleCry('defense_talent') ? getParam(atk.data, 'defense_talent', 'param2', 4) : 0));
       const before = atk.atkRage;
       atk.atkRage = Math.min(atk.maxRage, atk.atkRage + rageGain);
       actorRageSteps.push({ label: 'normal_attack_attack_rage_gain', delta: atk.atkRage - before, requested: rageGain, value: rageState(atk) });
@@ -6230,7 +6233,7 @@ function toggleConfigSummary() {
     let html = `<div class="config-team-title">${label}</div>`;
     team.forEach(c => {
       const hp = c.dur * 4;
-      const rageGain = Math.round(c.will * 0.2649);
+      const rageGain = calcNormalRageGain(c.will);
       let skillRows = '';
       c.skills.forEach(s => {
         const info = PARAM_INFO[s.effect] || {};
