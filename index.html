@@ -4291,13 +4291,13 @@ const SpeedModifierType = Object.freeze({
   EQUIPMENT: 'equipment',
   STATUS: 'status',
 });
-const ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE = true;
+const ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE = false;
 const DEFAULT_ACTION_GAUGE_SPEED_MODIFIER_ENABLED = Object.freeze({
   [SpeedModifierType.WARCRY]: true,
   [SpeedModifierType.ATTACK_SKILL]: ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE,
-  [SpeedModifierType.PASSIVE]: true,
-  [SpeedModifierType.EQUIPMENT]: true,
-  [SpeedModifierType.STATUS]: true,
+  [SpeedModifierType.PASSIVE]: false,
+  [SpeedModifierType.EQUIPMENT]: false,
+  [SpeedModifierType.STATUS]: false,
 });
 
 class Fighter {
