@@ -148,14 +148,15 @@ const app = loadBattleSim();
   assert(slowStatus, 'slow application must produce an analysis status event');
   const progress = slowStatus.debugCalculation.status;
   assert.strictEqual(progress.oldEffectiveAgi, 150, 'slow log must record effective AGI before application');
-  assert.strictEqual(progress.newEffectiveAgi, 75, 'slow log must record effective AGI after application');
+  assert.strictEqual(progress.newEffectiveAgi, 150, 'attack-skill slow must not change action-gauge AGI by default');
+  assert.strictEqual(progress.agiAfter, 75, 'attack-skill slow must still change display AGI');
   assert.strictEqual(progress.actionGauge, 750, 'slow must preserve the action gauge accumulated before application');
   assert.strictEqual(progress.actionProgressPreserved, true, 'slow log must mark action progress as preserved');
   assert(Math.abs(progress.oldInterval - (1000 / 150)) < 1e-12, 'slow log must record the old interval');
   assert(Math.abs(progress.oldRemainingTime - (250 / 150)) < 1e-12, 'slow log must record old remaining time');
   assert(Math.abs(progress.progressRatio - 0.75) < 1e-12, 'slow log must record the preserved progress ratio');
-  assert(Math.abs(progress.newInterval - (1000 / 75)) < 1e-12, 'slow log must record the new interval');
-  assert(Math.abs(progress.newRemainingTime - (250 / 75)) < 1e-12, 'slow log must derive new remaining time from preserved progress');
+  assert(Math.abs(progress.newInterval - (1000 / 150)) < 1e-12, 'default action-gauge interval must exclude attack-skill slow');
+  assert(Math.abs(progress.newRemainingTime - (250 / 150)) < 1e-12, 'remaining time must preserve progress at unchanged action-gauge AGI');
 }
 
 {
@@ -273,7 +274,12 @@ const app = loadBattleSim();
   ]);
 
   const result = app.withSeededRandom(9753, () =>
-    app.simulateBattle6v6([repeatedSlowSource], [sealingTarget], true, { analysisMode: 'developer' })
+    app.simulateBattle6v6(
+      [repeatedSlowSource],
+      [sealingTarget],
+      true,
+      { analysisMode: 'developer', attackSkillSpeedAffectsActionGauge: true }
+    )
   );
   const slowApplications = result.analysisEvents.filter(event =>
     event.eventType === 'status' &&
@@ -356,8 +362,8 @@ const app = loadBattleSim();
 {
   assert.strictEqual(
     app.ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE,
-    true,
-    'attack-skill speed must affect the action gauge by default for backward compatibility'
+    false,
+    'attack-skill speed must not affect the action gauge by default'
   );
 
   const slowSource = beast('test_speed_mode_source', 'Speed Mode Source', {
@@ -379,17 +385,23 @@ const app = loadBattleSim();
   );
   const gaugeOn = run(true);
   const gaugeOff = run(false);
+  const gaugeDefault = run();
   const onActions = gaugeOn.analysisEvents.filter(event => event.eventType === 'action_start');
   const offActions = gaugeOff.analysisEvents.filter(event => event.eventType === 'action_start');
+  const defaultActions = gaugeDefault.analysisEvents.filter(event => event.eventType === 'action_start');
   const onSlow = gaugeOn.analysisEvents.find(event => event.eventType === 'status' && event.skillId === 'slow');
   const offSlow = gaugeOff.analysisEvents.find(event => event.eventType === 'status' && event.skillId === 'slow');
+  const defaultSlow = gaugeDefault.analysisEvents.find(event => event.eventType === 'status' && event.skillId === 'slow');
 
   assert.strictEqual(onSlow.stateAfter.target.agi, 50, 'gauge ON must apply slow to display AGI');
   assert.strictEqual(offSlow.stateAfter.target.agi, 50, 'gauge OFF must still apply slow to display AGI');
+  assert.strictEqual(defaultSlow.stateAfter.target.agi, 50, 'default mode must apply slow to display AGI');
   assert.strictEqual(onSlow.debugCalculation.status.actionGaugeAgiAfter, 50, 'gauge ON must use slowed AGI for action timing');
   assert.strictEqual(offSlow.debugCalculation.status.actionGaugeAgiAfter, 100, 'gauge OFF must exclude attack-skill slow from action timing');
+  assert.strictEqual(defaultSlow.debugCalculation.status.actionGaugeAgiAfter, 100, 'default action timing must exclude attack-skill slow');
   assert.strictEqual(onActions[1].actor.beastId, slowSource.id, 'gauge ON must delay the slowed target');
   assert.strictEqual(offActions[1].actor.beastId, slowTarget.id, 'gauge OFF must preserve the target action-gauge speed');
+  assert.strictEqual(defaultActions[1].actor.beastId, slowTarget.id, 'default mode must preserve the target action-gauge speed');
   assert.strictEqual(
     gaugeOff.actionGaugeSpeedModifierEnabled[app.SpeedModifierType.ATTACK_SKILL],
     false,
@@ -405,6 +417,42 @@ const app = loadBattleSim();
   );
   assert.strictEqual(rapidFighter.getDisplayAGI(), 112, 'warcry speed must affect display AGI');
   assert.strictEqual(rapidFighter.getActionGaugeAGI(), 112, 'warcry speed must always affect action-gauge AGI');
+
+  const makeTypedModifierFighter = actionGaugeSpeedModifierEnabled => {
+    const fighter = new app.Fighter(
+      beast('test_typed_speed_modifiers', 'Typed Speed Modifiers', { agi: 100, atk: 1, dur: 1000, will: 1 }, []),
+      'A-typed',
+      actionGaugeSpeedModifierEnabled
+    );
+    fighter.addSpeedModifier({
+      id: 'passive-speed',
+      type: app.SpeedModifierType.PASSIVE,
+      operation: 'multiply',
+      value: 1.20,
+    });
+    fighter.addSpeedModifier({
+      id: 'equipment-speed',
+      type: app.SpeedModifierType.EQUIPMENT,
+      operation: 'subtract',
+      value: 10,
+    });
+    fighter.poisonStacks = 5;
+    return fighter;
+  };
+  const typedDefault = makeTypedModifierFighter({});
+  assert.strictEqual(typedDefault.getDisplayAGI(), 105, 'display AGI must include passive, equipment, and status modifiers');
+  assert.strictEqual(typedDefault.getActionGaugeAGI(), 100, 'passive, equipment, and status must be disabled for action gauge by default');
+
+  const typedEnabled = makeTypedModifierFighter({
+    [app.SpeedModifierType.PASSIVE]: true,
+    [app.SpeedModifierType.EQUIPMENT]: true,
+    [app.SpeedModifierType.STATUS]: true,
+  });
+  assert.strictEqual(
+    typedEnabled.getActionGaugeAGI(),
+    105,
+    'actionGaugeSpeedModifierEnabled must enable passive, equipment, and status modifiers by type'
+  );
 }
 
 {
