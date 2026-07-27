@@ -4352,7 +4352,7 @@ class Fighter {
     this.toxicSkinParam = 0;
     this.tormentBonus = 0; // 折磨による被ダメ増加率（永続）
     this.undyingUsed = false;
-    this.suppressNextSkill = false; // 交代後の最初の行動はスキル抑制
+    this.suppressNextSkill = false; // 参戦後の最初の行動は攻撃スキル抑制
     this.suppressRageGain = false;  // 回避など、ダメージなし行動のレイジ増加抑制
 
     this.applyPassiveStart();
@@ -5030,7 +5030,40 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     }, event));
   };
   let actionHadCarryover = false;
-  let pendingEntryFirstNormal = null;
+  let pendingEntryAttackSkillSuppression = null;
+  let pendingEntryDefenseSuppression = null;
+
+  const armEntrySuppressions = (entering, survivor) => {
+    entering.suppressNextSkill = true;
+    pendingEntryAttackSkillSuppression = {
+      fighter: entering,
+      armedAtActionNo: actionNo,
+    };
+    pendingEntryDefenseSuppression = {
+      entering,
+      survivor,
+      armedAtActionNo: actionNo,
+    };
+  };
+
+  const consumeEntryDefenseSuppressionByDamage = ({ source, target, damage, damageType }) => {
+    if (!pendingEntryDefenseSuppression || !(damage > 0)) return null;
+    const consumed = {
+      entering: fighterRef(pendingEntryDefenseSuppression.entering),
+      survivor: fighterRef(pendingEntryDefenseSuppression.survivor),
+      source: fighterRef(source),
+      target: fighterRef(target),
+      damage,
+      damageType,
+      armedAtActionNo: pendingEntryDefenseSuppression.armedAtActionNo,
+      consumedAtActionNo: actionNo,
+      actionProgressAffected: false,
+      attackCountAffected: false,
+      attackRageAffected: false,
+    };
+    pendingEntryDefenseSuppression = null;
+    return consumed;
+  };
 
   const checkUndying = (target) => {
     if (target.hp <= 0 && target.hasPassive('undying') && !target.undyingUsed) {
@@ -5155,9 +5188,14 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     const actionStateBefore = {
       actor: fighterState(atk),
       target: fighterState(def),
-      pendingEntryFirstNormal: pendingEntryFirstNormal ? {
-        attacker: fighterRef(pendingEntryFirstNormal.attacker),
-        defender: fighterRef(pendingEntryFirstNormal.defender),
+      pendingEntryAttackSkillSuppression: pendingEntryAttackSkillSuppression ? {
+        fighter: fighterRef(pendingEntryAttackSkillSuppression.fighter),
+        armedAtActionNo: pendingEntryAttackSkillSuppression.armedAtActionNo,
+      } : null,
+      pendingEntryDefenseSuppression: pendingEntryDefenseSuppression ? {
+        entering: fighterRef(pendingEntryDefenseSuppression.entering),
+        survivor: fighterRef(pendingEntryDefenseSuppression.survivor),
+        armedAtActionNo: pendingEntryDefenseSuppression.armedAtActionNo,
       } : null,
     };
     if (includeTeamSnapshots) {
@@ -5197,9 +5235,9 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           { condition: 'defense_rage_at_least_cost', passed: candidateDefenseSkill ? rageBefore >= requiredRage : false, actual: rageBefore, required: requiredRage },
           { condition: 'not_sealed', passed: !options.skillSealActive, actual: !!options.skillSealActive },
           { condition: 'not_multi_hit_skipped', passed: options.reason !== 'multi_hit_defense_check_skipped', actual: options.reason || null },
-          { condition: 'not_entry_first_normal_suppressed', passed: options.reason !== 'entry_first_normal_defense_suppressed', actual: options.reason || null },
+          { condition: 'not_entry_first_damage_suppressed', passed: !options.entryDamageSuppressed, actual: !!options.entryDamageSuppressed },
         ],
-        result: availableDefenseSkill && !options.skillSealActive ? 'defense_skill' : 'not_triggered',
+        result: availableDefenseSkill && !options.skillSealActive && !options.entryDamageSuppressed ? 'defense_skill' : 'not_triggered',
       },
     };
     if (options.skillSealActive) {
@@ -5211,6 +5249,18 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         },
         triggered: false,
         reason: 'sealed',
+        rageAfter: def.defRage,
+      };
+    }
+    if (options.entryDamageSuppressed) {
+      return {
+        ...baseInfo,
+        check: {
+          ...baseInfo.check,
+          reason: 'entry_first_damage_defense_suppressed',
+        },
+        triggered: false,
+        reason: 'entry_first_damage_defense_suppressed',
         rageAfter: def.defRage,
       };
     }
@@ -5392,12 +5442,14 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     const defenderSealActiveForDefense = def.skillSealTurns > 0;
     const attackSkillCandidate = atk.data.skills.find(s => s.type === 'attack') || null;
     const attackSkillCost = attackSkillCandidate ? getParam(atk.data, attackSkillCandidate.effect, 'rageCost', attackSkillCandidate.rageCost || 0) : null;
-    const skipSkill = atk.suppressNextSkill || skipByDodge || skipBySeal;
+    const skipByEntryAttackSkill =
+      pendingEntryAttackSkillSuppression?.fighter === atk;
+    const skipSkill = skipByEntryAttackSkill || skipByDodge || skipBySeal;
     let attackSkillAvailable = !skipSkill && !!atk.getActiveAttackSkill();
     let attackSkillSkipReason = null;
     if (skipBySeal) attackSkillSkipReason = 'skill_sealed';
     else if (skipByDodge) attackSkillSkipReason = 'target_first_dodge_forces_normal';
-    else if (atk.suppressNextSkill) attackSkillSkipReason = 'entry_suppression';
+    else if (skipByEntryAttackSkill) attackSkillSkipReason = 'entry_suppression';
     else if (!attackSkillAvailable) attackSkillSkipReason = 'insufficient_attack_rage_or_no_attack_skill';
     const attackSkillCheck = {
       skillId: attackSkillCandidate?.effect || null,
@@ -5407,7 +5459,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         { condition: 'attack_rage_at_least_cost', passed: attackSkillCandidate ? atk.atkRage >= attackSkillCost : false, actual: atk.atkRage, required: attackSkillCost },
         { condition: 'not_sealed', passed: !skipBySeal, actual: skipBySeal },
         { condition: 'not_forced_normal_by_first_dodge', passed: !skipByDodge, actual: skipByDodge },
-        { condition: 'not_entry_suppressed', passed: !atk.suppressNextSkill, actual: atk.suppressNextSkill },
+        { condition: 'not_entry_suppressed', passed: !skipByEntryAttackSkill, actual: skipByEntryAttackSkill },
       ],
       result: attackSkillAvailable ? 'attack_skill' : 'normal_attack',
       reason: attackSkillAvailable ? null : attackSkillSkipReason,
@@ -5479,36 +5531,27 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         stateAfter: { actor: fighterState(atk), target: fighterState(def) },
       });
     }
-    if (atk.suppressNextSkill) atk.suppressNextSkill = false;
+    if (skipByEntryAttackSkill) {
+      atk.suppressNextSkill = false;
+      pendingEntryAttackSkillSuppression = null;
+    }
 
     // スキル確認
     const atkSkill = skipSkill ? null : atk.getActiveAttackSkill();
-    if (pendingEntryFirstNormal?.defender === atk) {
-      pendingEntryFirstNormal = null;
-    }
     const skipEntryFirstDefense =
-      pendingEntryFirstNormal?.attacker === atk &&
-      pendingEntryFirstNormal?.defender === def &&
-      !atkSkill;
-    if (pendingEntryFirstNormal?.attacker === atk) {
-      pendingEntryFirstNormal = null;
-    }
+      pendingEntryDefenseSuppression?.survivor === def;
 
     // === 防御スキル（反応型）: 攻撃を受ける側がレイジ消費して発動 ===
-    if (!skipEntryFirstDefense) {
-      mainDefenseInfo = activateDefenseSkill(def, atk, { skillSealActive: defenderSealActiveForDefense, hitIndex: 1 });
-      targetRageSteps.push({ label: 'defense_skill_consume_or_check', value: rageState(def), detail: mainDefenseInfo });
-    } else {
-      mainDefenseInfo = {
-        triggered: false,
-        reason: defenderSealActiveForDefense ? 'sealed' : 'entry_first_normal_defense_suppressed',
-        sealed: defenderSealActiveForDefense,
-        hitIndex: 1,
-        rageBefore: def.defRage,
-        rageAfter: def.defRage,
-      };
-      targetRageSteps.push({ label: 'defense_suppressed_after_entry', value: rageState(def), detail: mainDefenseInfo });
-    }
+    mainDefenseInfo = activateDefenseSkill(def, atk, {
+      skillSealActive: defenderSealActiveForDefense,
+      entryDamageSuppressed: skipEntryFirstDefense,
+      hitIndex: 1,
+    });
+    targetRageSteps.push({
+      label: skipEntryFirstDefense ? 'defense_suppressed_for_entry_first_damage' : 'defense_skill_consume_or_check',
+      value: rageState(def),
+      detail: mainDefenseInfo,
+    });
 
     if (atkSkill) {
       push('log-skill', t('skillUse', fighterName(atk), skillName(atkSkill)));
@@ -5728,6 +5771,12 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     if (def.lacerateTurns > 0) {
       const bleedDmg = Math.round(def.maxHP * def.lacerateParam);
       def.hp = Math.max(0, def.hp - bleedDmg);
+      consumeEntryDefenseSuppressionByDamage({
+        source: atk,
+        target: def,
+        damage: bleedDmg,
+        damageType: 'lacerate_before_attack',
+      });
       def.lacerateTurns--;
       push('log-debuff', t('bleedBefore', fighterName(def), bleedDmg, def.hp));
       checkUndying(def);
@@ -5739,6 +5788,15 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     const targetMaxHpBeforeDamage = def.maxHP;
     const targetHpAfterDamageBeforeClamp = targetHpBeforeDamage - dmg;
     def.hp = Math.max(0, def.hp - dmg);
+    const entryDefenseSuppressionConsumed = consumeEntryDefenseSuppressionByDamage({
+      source: atk,
+      target: def,
+      damage: dmg,
+      damageType: atkSkill ? `attack_skill_${atkSkill.effect}` : 'normal_attack',
+    });
+    if (entryDefenseSuppressionConsumed) {
+      mainDefenseInfo.entryDefenseSuppressionConsumed = entryDefenseSuppressionConsumed;
+    }
     const targetHpAfterDamageClamp = def.hp;
     checkUndying(def);
     consumeBackwaterHit(def);
@@ -5956,6 +6014,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           comboTarget = defTeam[defIdx + 1];
           comboCarryOver = true;
           actionHadCarryover = true;
+          armEntrySuppressions(comboTarget, atk);
           applyEntryBattleCries(atk, comboTarget);
           comboTarget.entryEffectsAppliedByCarryover = true;
         }
@@ -5979,7 +6038,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               { condition: 'defense_rage_at_least_cost', passed: false, actual: comboTarget.defRage, required: null },
               { condition: 'not_sealed', passed: comboTarget.skillSealTurns <= 0, actual: comboTarget.skillSealTurns > 0 },
               { condition: 'not_multi_hit_skipped', passed: false, actual: 'multi_hit_defense_check_skipped' },
-              { condition: 'not_entry_first_normal_suppressed', passed: true, actual: null },
+              { condition: 'not_entry_first_damage_suppressed', passed: true, actual: null },
             ],
             result: 'not_triggered',
             reason: 'multi_hit_defense_check_skipped',
@@ -6090,6 +6149,15 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           const comboMaxHpBefore = comboTarget.maxHP;
           const comboHpAfterDamageBeforeClamp = comboHpBefore - comboDmg;
           comboTarget.hp = Math.max(0, comboTarget.hp - comboDmg);
+          const comboEntryDefenseSuppressionConsumed = consumeEntryDefenseSuppressionByDamage({
+            source: atk,
+            target: comboTarget,
+            damage: comboDmg,
+            damageType: comboCarryOver ? 'combo_carryover' : 'combo',
+          });
+          if (comboEntryDefenseSuppressionConsumed) {
+            comboDefenseInfo.entryDefenseSuppressionConsumed = comboEntryDefenseSuppressionConsumed;
+          }
           const comboHpAfterClamp = comboTarget.hp;
           checkUndying(comboTarget);
           consumeBackwaterHit(comboTarget);
@@ -6522,6 +6590,39 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
 
   // 参戦時戦吼。キャリーオーバー時も2発目のダメージ前にここを通す。
   const applyEntryBattleCries = (active, entering, includeActive = false) => {
+    const applyEntryDamage = ({ source, target, amount, damageType, skill }) => {
+      const stateBefore = { actor: fighterState(source), target: fighterState(target) };
+      const hpBefore = target.hp;
+      target.hp = Math.max(target === source ? 1 : 0, target.hp - amount);
+      const appliedDamage = hpBefore - target.hp;
+      const entryDefenseSuppressionConsumed = consumeEntryDefenseSuppressionByDamage({
+        source,
+        target,
+        damage: appliedDamage,
+        damageType,
+      });
+      recordAnalysis({
+        eventType: 'entry_damage',
+        attackType: 'battlecry',
+        skillId: skill.effect,
+        skillName: skillName(skill),
+        hitIndex: 'entry',
+        hitType: damageType,
+        actor: fighterRef(source),
+        target: fighterRef(target),
+        nonAction: true,
+        damage: {
+          type: damageType,
+          displayed: appliedDamage,
+          hpBefore,
+          hpAfter: target.hp,
+          entryDefenseSuppressionConsumed,
+        },
+        stateBefore,
+        stateAfter: { actor: fighterState(source), target: fighterState(target) },
+      });
+      return appliedDamage;
+    };
     const entrants = includeActive ? [active, entering] : [entering];
     entrants.forEach(f => {
       const sacrifice = f.data.skills.find(s => s.type === 'battlecry' && s.effect === 'sacrifice');
@@ -6529,7 +6630,13 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         const hpRate = getParam(f.data, 'sacrifice', 'param', sacrifice.param || 0.10);
         const atkUp = getParam(f.data, 'sacrifice', 'param2', sacrifice.param2 || 0.225);
         const hpCost = Math.round(f.maxHP * hpRate);
-        f.hp = Math.max(1, f.hp - hpCost);
+        applyEntryDamage({
+          source: f,
+          target: f,
+          amount: hpCost,
+          damageType: 'entry_sacrifice_self_damage',
+          skill: sacrifice,
+        });
         f.entryAtkBonus = (f.entryAtkBonus || 0) + atkUp;
         f.sacrificeUsed = true;
         push('log-buff', t('sacrificeStart', fighterName(f), hpCost, Math.round(atkUp * 1000) / 10, f.hp));
@@ -6541,8 +6648,20 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         const hpRate = getParam(f.data, 'sacrifice_damage', 'param', sacrificeDamage.param || 0.25);
         const hpCost = Math.round(f.maxHP * hpRate);
         const dmg = hpCost;
-        f.hp = Math.max(1, f.hp - hpCost);
-        sacrificeTarget.hp = Math.max(0, sacrificeTarget.hp - dmg);
+        applyEntryDamage({
+          source: f,
+          target: f,
+          amount: hpCost,
+          damageType: 'entry_sacrifice_damage_self',
+          skill: sacrificeDamage,
+        });
+        applyEntryDamage({
+          source: f,
+          target: sacrificeTarget,
+          amount: dmg,
+          damageType: 'entry_sacrifice_damage_target',
+          skill: sacrificeDamage,
+        });
         checkUndying(sacrificeTarget);
         f.sacrificeDamageUsed = true;
         push('log-buff', t('sacrificeDamageStart', fighterName(f), fighterName(sacrificeTarget), hpCost, dmg, f.hp, sacrificeTarget.hp));
@@ -6739,41 +6858,45 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       if (isActorA) {
         idxB++;
         if (idxB >= teamB.length) { winningTeam = 'A'; break; }
-        push('log-buff', t('joins', t('teamB'), fighterName(teamB[idxB]), teamB[idxB].maxHP));
+        const entering = teamB[idxB];
+        const enteredByCarryover = !!entering.entryEffectsAppliedByCarryover;
+        if (!enteredByCarryover) armEntrySuppressions(entering, teamA[idxA]);
+        push('log-buff', t('joins', t('teamB'), fighterName(entering), entering.maxHP));
         recordAnalysis({
           eventType: 'entry',
           actor: fighterRef(actor),
-          target: fighterRef(teamB[idxB]),
-          nextFighter: fighterRef(teamB[idxB]),
+          target: fighterRef(entering),
+          nextFighter: fighterRef(entering),
           defeatedTeam: 'B',
-          carryoverEntryEffectsApplied: !!teamB[idxB].entryEffectsAppliedByCarryover,
-          stateAfter: { actor: fighterState(actor), target: fighterState(teamB[idxB]) },
+          carryoverEntryEffectsApplied: enteredByCarryover,
+          stateAfter: { actor: fighterState(actor), target: fighterState(entering) },
         });
-        if (teamB[idxB].entryEffectsAppliedByCarryover) {
-          teamB[idxB].entryEffectsAppliedByCarryover = false;
+        if (enteredByCarryover) {
+          entering.entryEffectsAppliedByCarryover = false;
         } else {
-          applyEntryBattleCries(teamA[idxA], teamB[idxB]);
+          applyEntryBattleCries(teamA[idxA], entering);
         }
-        pendingEntryFirstNormal = { attacker: teamB[idxB], defender: teamA[idxA] };
       } else {
         idxA++;
         if (idxA >= teamA.length) { winningTeam = 'B'; break; }
-        push('log-buff', t('joins', t('teamA'), fighterName(teamA[idxA]), teamA[idxA].maxHP));
+        const entering = teamA[idxA];
+        const enteredByCarryover = !!entering.entryEffectsAppliedByCarryover;
+        if (!enteredByCarryover) armEntrySuppressions(entering, teamB[idxB]);
+        push('log-buff', t('joins', t('teamA'), fighterName(entering), entering.maxHP));
         recordAnalysis({
           eventType: 'entry',
           actor: fighterRef(actor),
-          target: fighterRef(teamA[idxA]),
-          nextFighter: fighterRef(teamA[idxA]),
+          target: fighterRef(entering),
+          nextFighter: fighterRef(entering),
           defeatedTeam: 'A',
-          carryoverEntryEffectsApplied: !!teamA[idxA].entryEffectsAppliedByCarryover,
-          stateAfter: { actor: fighterState(actor), target: fighterState(teamA[idxA]) },
+          carryoverEntryEffectsApplied: enteredByCarryover,
+          stateAfter: { actor: fighterState(actor), target: fighterState(entering) },
         });
-        if (teamA[idxA].entryEffectsAppliedByCarryover) {
-          teamA[idxA].entryEffectsAppliedByCarryover = false;
+        if (enteredByCarryover) {
+          entering.entryEffectsAppliedByCarryover = false;
         } else {
-          applyEntryBattleCries(teamB[idxB], teamA[idxA]);
+          applyEntryBattleCries(teamB[idxB], entering);
         }
-        pendingEntryFirstNormal = { attacker: teamA[idxA], defender: teamB[idxB] };
       }
 
       // 交代処理: CTBリセット。通常攻撃なら交代直後でもレイジは増加する。
@@ -6801,41 +6924,45 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       if (isActorA) {
         idxA++;
         if (idxA >= teamA.length) { winningTeam = 'B'; break; }
-        push('log-buff', t('joins', t('teamA'), fighterName(teamA[idxA]), teamA[idxA].maxHP));
+        const entering = teamA[idxA];
+        const enteredByCarryover = !!entering.entryEffectsAppliedByCarryover;
+        if (!enteredByCarryover) armEntrySuppressions(entering, defender);
+        push('log-buff', t('joins', t('teamA'), fighterName(entering), entering.maxHP));
         recordAnalysis({
           eventType: 'entry',
           actor: fighterRef(defender),
-          target: fighterRef(teamA[idxA]),
-          nextFighter: fighterRef(teamA[idxA]),
+          target: fighterRef(entering),
+          nextFighter: fighterRef(entering),
           defeatedTeam: 'A',
-          carryoverEntryEffectsApplied: !!teamA[idxA].entryEffectsAppliedByCarryover,
-          stateAfter: { actor: fighterState(defender), target: fighterState(teamA[idxA]) },
+          carryoverEntryEffectsApplied: enteredByCarryover,
+          stateAfter: { actor: fighterState(defender), target: fighterState(entering) },
         });
-        if (teamA[idxA].entryEffectsAppliedByCarryover) {
-          teamA[idxA].entryEffectsAppliedByCarryover = false;
+        if (enteredByCarryover) {
+          entering.entryEffectsAppliedByCarryover = false;
         } else {
-          applyEntryBattleCries(teamB[idxB], teamA[idxA]);
+          applyEntryBattleCries(teamB[idxB], entering);
         }
-        pendingEntryFirstNormal = { attacker: teamA[idxA], defender };
       } else {
         idxB++;
         if (idxB >= teamB.length) { winningTeam = 'A'; break; }
-        push('log-buff', t('joins', t('teamB'), fighterName(teamB[idxB]), teamB[idxB].maxHP));
+        const entering = teamB[idxB];
+        const enteredByCarryover = !!entering.entryEffectsAppliedByCarryover;
+        if (!enteredByCarryover) armEntrySuppressions(entering, defender);
+        push('log-buff', t('joins', t('teamB'), fighterName(entering), entering.maxHP));
         recordAnalysis({
           eventType: 'entry',
           actor: fighterRef(defender),
-          target: fighterRef(teamB[idxB]),
-          nextFighter: fighterRef(teamB[idxB]),
+          target: fighterRef(entering),
+          nextFighter: fighterRef(entering),
           defeatedTeam: 'B',
-          carryoverEntryEffectsApplied: !!teamB[idxB].entryEffectsAppliedByCarryover,
-          stateAfter: { actor: fighterState(defender), target: fighterState(teamB[idxB]) },
+          carryoverEntryEffectsApplied: enteredByCarryover,
+          stateAfter: { actor: fighterState(defender), target: fighterState(entering) },
         });
-        if (teamB[idxB].entryEffectsAppliedByCarryover) {
-          teamB[idxB].entryEffectsAppliedByCarryover = false;
+        if (enteredByCarryover) {
+          entering.entryEffectsAppliedByCarryover = false;
         } else {
-          applyEntryBattleCries(teamA[idxA], teamB[idxB]);
+          applyEntryBattleCries(teamA[idxA], entering);
         }
-        pendingEntryFirstNormal = { attacker: teamB[idxB], defender };
       }
 
       // 反撃や反射で攻撃側が倒れた場合も、通常の交代と同じ扱いにする。
