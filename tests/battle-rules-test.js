@@ -555,6 +555,167 @@ const app = loadBattleSim();
 }
 
 {
+  const survivor = beast('test_entry_plain_survivor', 'Entry Plain Survivor', {
+    agi: 100, atk: 500, dur: 2000, will: 1,
+  }, [
+    { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+  ]);
+  const defeated = beast('test_entry_plain_defeated', 'Entry Plain Defeated', {
+    agi: 50, atk: 1, dur: 1, will: 1,
+  }, []);
+  const kong = beast('test_entry_plain_kong', 'Entry Plain Kong', {
+    agi: 200, atk: 100, dur: 1000, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(1101, () =>
+    app.simulateBattle6v6([survivor], [defeated, kong], true, { analysisMode: 'developer' })
+  );
+  const firstKongHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'main' &&
+    event.actor?.beastId === kong.id &&
+    event.target?.beastId === survivor.id
+  );
+
+  assert(firstKongHit, 'plain entrant must produce a first normal hit');
+  assert.strictEqual(firstKongHit.attackType, 'normal', 'plain entrant first action must be a normal attack');
+  assert.strictEqual(firstKongHit.defense.triggered, false, 'survivor defense must be suppressed on the first damage after entry');
+  assert.strictEqual(
+    firstKongHit.defense.reason,
+    'entry_first_damage_defense_suppressed',
+    'plain entry suppression must identify the first damage event'
+  );
+}
+
+{
+  const survivor = beast('test_entry_sacrifice_survivor', 'Entry Sacrifice Survivor', {
+    agi: 100, atk: 500, dur: 2000, will: 1,
+  }, [
+    { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+  ]);
+  const defeated = beast('test_entry_sacrifice_defeated', 'Entry Sacrifice Defeated', {
+    agi: 50, atk: 1, dur: 1, will: 1,
+  }, []);
+  const tiger = beast('test_entry_sacrifice_tiger', 'Entry Sacrifice Tiger', {
+    agi: 200, atk: 100, dur: 1000, will: 1,
+  }, [
+    { name: '戦吼-奉納', type: 'battlecry', effect: 'sacrifice', param: 0.10, param2: 0.225 },
+  ]);
+
+  const result = app.withSeededRandom(1102, () =>
+    app.simulateBattle6v6([survivor], [defeated, tiger], true, { analysisMode: 'developer' })
+  );
+  const entryDamage = result.analysisEvents.find(event =>
+    event.eventType === 'entry_damage' &&
+    event.actor?.beastId === tiger.id &&
+    event.hitType === 'entry_sacrifice_self_damage'
+  );
+  const firstTigerAction = result.analysisEvents.find(event =>
+    event.eventType === 'action_start' && event.actor?.beastId === tiger.id
+  );
+  const firstTigerHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'main' &&
+    event.actor?.beastId === tiger.id &&
+    event.target?.beastId === survivor.id
+  );
+
+  assert(entryDamage, 'sacrifice entry must record its self-damage as a non-action damage event');
+  assert.strictEqual(entryDamage.nonAction, true, 'sacrifice entry damage must not count as an action');
+  assert.strictEqual(entryDamage.damage.displayed, 400, 'sacrifice must deal ten percent max HP to the entrant');
+  assert.strictEqual(
+    entryDamage.damage.entryDefenseSuppressionConsumed.damageType,
+    'entry_sacrifice_self_damage',
+    'sacrifice self-damage must consume the first-damage defense suppression'
+  );
+  assert.strictEqual(entryDamage.damage.entryDefenseSuppressionConsumed.actionProgressAffected, false);
+  assert.strictEqual(entryDamage.damage.entryDefenseSuppressionConsumed.attackCountAffected, false);
+  assert.strictEqual(entryDamage.damage.entryDefenseSuppressionConsumed.attackRageAffected, false);
+  assert(firstTigerAction.actionNo > entryDamage.actionNo, 'entry self-damage must not allocate a new action number');
+  assert.strictEqual(firstTigerHit.attackType, 'normal', 'entrant first action must remain a normal attack');
+  assert.strictEqual(firstTigerHit.defense.triggered, true, 'survivor defense must be available after sacrifice consumed the first damage');
+  assert.strictEqual(firstTigerHit.defense.skillId, 'harden', 'harden must trigger on the post-sacrifice normal attack');
+}
+
+{
+  const survivor = beast('test_entry_rapid_survivor', 'Entry Rapid Survivor', {
+    agi: 100, atk: 500, dur: 2000, will: 1,
+  }, [
+    { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+  ]);
+  const defeated = beast('test_entry_rapid_defeated', 'Entry Rapid Defeated', {
+    agi: 50, atk: 1, dur: 1, will: 1,
+  }, []);
+  const rapidEntrant = beast('test_entry_rapid_entrant', 'Entry Rapid Entrant', {
+    agi: 100, atk: 100, dur: 1000, will: 1,
+  }, [
+    { name: '戦吼-急速', type: 'battlecry', effect: 'rapid', param: 0.12, param2: 0.08 },
+  ]);
+
+  const result = app.withSeededRandom(1103, () =>
+    app.simulateBattle6v6([survivor], [defeated, rapidEntrant], true, { analysisMode: 'developer' })
+  );
+  const firstEntrantAction = result.analysisEvents.find(event =>
+    event.eventType === 'action_start' && event.actor?.beastId === rapidEntrant.id
+  );
+  const firstEntrantHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'main' &&
+    event.actor?.beastId === rapidEntrant.id &&
+    event.target?.beastId === survivor.id
+  );
+  const entryDamage = result.analysisEvents.find(event =>
+    event.eventType === 'entry_damage' && event.actor?.beastId === rapidEntrant.id
+  );
+
+  assert.strictEqual(entryDamage, undefined, 'non-damaging rapid must not create or consume an entry damage event');
+  assert.strictEqual(firstEntrantAction.order.effectiveAgiB, 112, 'rapid must affect post-entry action order');
+  assert.strictEqual(firstEntrantHit.defense.triggered, false, 'rapid must leave first-damage defense suppression armed');
+  assert.strictEqual(firstEntrantHit.defense.reason, 'entry_first_damage_defense_suppressed');
+}
+
+{
+  const originalApplyBattleCry = app.Fighter.prototype.applyBattleCry;
+  app.Fighter.prototype.applyBattleCry = function applyBattleCryWithEntryRage() {
+    originalApplyBattleCry.call(this);
+    if (this.data.id === 'test_entry_rage_entrant') this.atkRage = 50;
+  };
+  try {
+    const survivor = beast('test_entry_rage_survivor', 'Entry Rage Survivor', {
+      agi: 100, atk: 500, dur: 2000, will: 1,
+    }, [
+      { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+    ]);
+    const defeated = beast('test_entry_rage_defeated', 'Entry Rage Defeated', {
+      agi: 50, atk: 1, dur: 1, will: 1,
+    }, []);
+    const rageEntrant = beast('test_entry_rage_entrant', 'Entry Rage Entrant', {
+      agi: 200, atk: 100, dur: 1000, will: 1,
+    }, [
+      { name: '攻撃-大地震撼', type: 'attack', rageCost: 50, effect: 'quake', param: 1.50, param2: 0.20 },
+    ]);
+
+    const result = app.withSeededRandom(1104, () =>
+      app.simulateBattle6v6([survivor], [defeated, rageEntrant], true, { analysisMode: 'developer' })
+    );
+    const entrantHits = result.analysisEvents.filter(event =>
+      event.eventType === 'hit' &&
+      event.hitType === 'main' &&
+      event.actor?.beastId === rageEntrant.id
+    );
+
+    assert.strictEqual(entrantHits[0].attackType, 'normal', 'entry rage must not bypass first-action attack skill suppression');
+    assert.strictEqual(entrantHits[0].attackSkill.reason, 'entry_suppression');
+    assert.strictEqual(entrantHits[0].defense.reason, 'entry_first_damage_defense_suppressed');
+    assert.strictEqual(entrantHits[1].attackType, 'skill', 'attack skill must become available after the first entrant action');
+    assert.strictEqual(entrantHits[1].skillId, 'quake');
+    assert.strictEqual(entrantHits[1].defense.triggered, true, 'first-damage defense suppression must be consumed independently');
+  } finally {
+    app.Fighter.prototype.applyBattleCry = originalApplyBattleCry;
+  }
+}
+
+{
   assert.strictEqual(app.ENABLE_QUAKE_HARDEN_LINK_BUG, false, 'quake harden hidden reservation bug must stay disabled');
 
   const quakeUser = beast('test_quake_user', 'Quake User', { agi: 200, atk: 100, will: 999 }, [
