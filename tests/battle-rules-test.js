@@ -716,6 +716,154 @@ const app = loadBattleSim();
 }
 
 {
+  const runDamageCase = (id, skills, defenderSkills = []) => {
+    const attacker = beast(`test_damage_scope_attacker_${id}`, `Damage Scope Attacker ${id}`, {
+      agi: 200, atk: 100, dur: 1000, will: 1,
+    }, skills);
+    const defender = beast(`test_damage_scope_defender_${id}`, `Damage Scope Defender ${id}`, {
+      agi: 100, atk: 1, dur: 1000, will: 1,
+    }, defenderSkills);
+    const result = app.withSeededRandom(1201, () =>
+      app.simulateBattle6v6([attacker], [defender], true, { analysisMode: 'developer' })
+    );
+    return result.analysisEvents.find(event =>
+      event.eventType === 'hit' &&
+      event.hitType === 'main' &&
+      event.actor?.beastId === attacker.id
+    );
+  };
+
+  const normalHit = runDamageCase('normal', []);
+  const quakeHit = runDamageCase('quake', [
+    { name: '攻撃-大地震撼', type: 'attack', rageCost: 0, effect: 'quake', param: 1.50, param2: 0 },
+  ]);
+  const fullPowerLv4Hit = runDamageCase('full_power_lv4', [
+    { name: '攻撃-全力一撃', type: 'attack', rageCost: 0, effect: 'full_power', param: 2.30 },
+  ]);
+  const fullPowerLv2Hit = runDamageCase('full_power_lv2', [
+    { name: '攻撃-全力一撃', type: 'attack', rageCost: 0, effect: 'full_power', param: 2.10 },
+  ]);
+  const hardenedFullPowerHit = runDamageCase('full_power_hardened', [
+    { name: '攻撃-全力一撃', type: 'attack', rageCost: 0, effect: 'full_power', param: 2.30 },
+  ], [
+    { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+  ]);
+
+  const variance = fullPowerLv4Hit.damage.variance;
+  assert.strictEqual(
+    fullPowerLv4Hit.damage.displayed,
+    Math.round(100 * 2.30 * 0.9 * variance),
+    'Lv4 full power must retain 230% display ratio and apply only its hidden 0.9 modifier'
+  );
+  assert.strictEqual(
+    fullPowerLv2Hit.damage.displayed,
+    Math.round(100 * 2.10 * 0.9 * variance),
+    'Lv2 full power must retain 210% display ratio and apply only its hidden 0.9 modifier'
+  );
+  assert.strictEqual(fullPowerLv4Hit.debugCalculation.damage.skillCalculation.configuredRatio, 2.30);
+  assert.strictEqual(fullPowerLv2Hit.debugCalculation.damage.skillCalculation.configuredRatio, 2.10);
+  assert.strictEqual(fullPowerLv4Hit.debugCalculation.damage.skillCalculation.hiddenDamageMultiplier, 0.9);
+  assert(
+    fullPowerLv4Hit.debugCalculation.damage.steps.some(step =>
+      step.label === 'full_power_hidden_multiplier' && step.multiplier === 0.9
+    ),
+    'full power debug steps must expose the skill-only hidden multiplier'
+  );
+  assert.strictEqual(
+    hardenedFullPowerHit.damage.displayed,
+    Math.round(100 * 2.30 * 0.9 * 0.65 * variance),
+    'harden must apply its separate 35% reduction to full power'
+  );
+  assert.strictEqual(
+    normalHit.damage.displayed,
+    Math.round(Math.round(100 * normalHit.damage.variance)),
+    'normal attack must retain its existing damage path without the hidden modifier'
+  );
+  assert.strictEqual(
+    quakeHit.damage.displayed,
+    Math.round(Math.round(100 * 1.50 * quakeHit.damage.variance)),
+    'other attack skills must retain their existing damage path without the hidden modifier'
+  );
+  assert(
+    !normalHit.debugCalculation.damage.steps.some(step => step.label === 'full_power_hidden_multiplier') &&
+    !quakeHit.debugCalculation.damage.steps.some(step => step.label === 'full_power_hidden_multiplier'),
+    'the hidden 0.9 modifier must not leak into normal attacks or other skills'
+  );
+}
+
+{
+  const dacentrurus = beast('test_dacentrurus_purify_waver', 'Dacentrurus Purify Waver', {
+    agi: 200, atk: 100, dur: 100, will: 1,
+  }, [
+    { name: '防御-浄化術', type: 'defense', rageCost: 0, effect: 'purify', param: 8 },
+    { name: '戦吼-動揺', type: 'battlecry', effect: 'waver', param: 0.30, param2: 0.10 },
+  ]);
+  dacentrurus.hp_start = 300;
+  const opponent = beast('test_dacentrurus_purify_opponent', 'Dacentrurus Purify Opponent', {
+    agi: 150, atk: 1, dur: 120, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(1202, () =>
+    app.simulateBattle6v6([dacentrurus], [opponent], true, { analysisMode: 'developer' })
+  );
+  const purifyHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'main' &&
+    event.target?.beastId === dacentrurus.id &&
+    event.defense?.skillId === 'purify'
+  );
+  const dacentrurusHits = result.analysisEvents.filter(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'main' &&
+    event.actor?.beastId === dacentrurus.id
+  );
+
+  assert(purifyHit, 'Dacentrurus must trigger purify after its first action');
+  assert.strictEqual(
+    purifyHit.defense.purify.dakentrulusAttackDownRemoved.remainingTurnsBefore,
+    2,
+    'purify must remove the two remaining attack-down turns'
+  );
+  assert.strictEqual(purifyHit.defense.purify.hpBefore, 300);
+  assert.strictEqual(purifyHit.defense.purify.hpAfter, 316, 'purify must heal for two removed stacks at 8 HP each');
+  assert.strictEqual(
+    purifyHit.defense.purify.dakentrulusAttackUpScheduledEffect.scheduled,
+    true,
+    'purify must preserve the later attack-up reservation'
+  );
+  assert.strictEqual(
+    purifyHit.defense.purify.dakentrulusAttackUpScheduledEffect.active,
+    false,
+    'attack-up must not start immediately when attack-down is purified'
+  );
+  assert.strictEqual(
+    purifyHit.defense.purify.dakentrulusAttackUpScheduledEffect.startsAtAttackCount,
+    3,
+    'attack-up must retain its original three-action start time'
+  );
+  assert.deepStrictEqual(
+    dacentrurusHits.slice(0, 4).map(event => event.damage.baseATK),
+    [90, 100, 100, 130],
+    'attack-down must end on purify while attack-up starts only at the original fourth attack'
+  );
+  assert.strictEqual(
+    dacentrurusHits[1].stateBefore.actor.statuses.dakentrulusAttackDownDebuff.active,
+    false,
+    'the attack-down state must remain cleansed after purify'
+  );
+  assert.strictEqual(
+    dacentrurusHits[1].stateBefore.actor.statuses.dakentrulusAttackUpScheduledEffect.active,
+    false,
+    'the first attack after purify must not receive the scheduled attack-up'
+  );
+  assert.strictEqual(
+    dacentrurusHits[3].stateBefore.actor.statuses.dakentrulusAttackUpScheduledEffect.active,
+    true,
+    'the scheduled attack-up must activate after three total attacks'
+  );
+}
+
+{
   assert.strictEqual(app.ENABLE_QUAKE_HARDEN_LINK_BUG, false, 'quake harden hidden reservation bug must stay disabled');
 
   const quakeUser = beast('test_quake_user', 'Quake User', { agi: 200, atk: 100, will: 999 }, [

@@ -120,21 +120,30 @@ const fullPowerHit = (fullPowerResult.analysisEvents || []).find(event =>
 assert(fullPowerHit, 'full power hit must be present for calculation-order verification');
 const fullPowerSteps = fullPowerHit.debugCalculation.damage.steps;
 assert.deepStrictEqual(
-  fullPowerSteps.slice(0, 4).map(step => step.label),
-  ['base_attack', 'skill_multiplier', 'random_multiplier', 'rounding'],
-  'full power steps must preserve the code order: skill multiplier, random multiplier, then first rounding'
+  fullPowerSteps.slice(0, 3).map(step => step.label),
+  ['base_attack', 'skill_multiplier', 'full_power_hidden_multiplier'],
+  'full power steps must apply its display ratio and skill-only hidden multiplier first'
+);
+const fullPowerDefenseStep = fullPowerSteps.find(step => step.label === 'defense_multiplier');
+const fullPowerRandomStep = fullPowerSteps.find(step => step.label === 'random_multiplier');
+const fullPowerRoundingStep = fullPowerSteps.find(step => step.label === 'rounding');
+assert.strictEqual(
+  fullPowerRandomStep.before,
+  fullPowerDefenseStep.after,
+  'full power random variance must run after the target defense multiplier'
 );
 assert.strictEqual(
-  fullPowerSteps[2].after,
-  fullPowerSteps[1].after * fullPowerSteps[2].multiplier,
-  'full power random step must continue from the skill-multiplied value'
+  fullPowerRoundingStep.after,
+  Math.round(fullPowerRoundingStep.before),
+  'full power must round the completed skill-only calculation once'
 );
 [
   'base_attack',
-  'random_multiplier',
   'skill_multiplier',
+  'full_power_hidden_multiplier',
   'damage_bonus_multiplier',
   'defense_multiplier',
+  'random_multiplier',
   'rounding',
 ].forEach(label => {
   assert(
