@@ -4282,6 +4282,7 @@ function applyOcrBatchImport() {
 
 // ===== バトルステート =====
 const ENABLE_QUAKE_HARDEN_LINK_BUG = false;
+const COMBO_SECOND_HIT_DAMAGE_MULTIPLIER = 1.05;
 // 実機確認済み: 封印中は攻撃スキルとすべての防御スキルを発動しない。
 const SKILL_SEAL_BLOCKS_DEFENSE_SKILLS = true;
 const SpeedModifierType = Object.freeze({
@@ -5049,6 +5050,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     baseATK,
     baseLabel = 'baseATK',
     skillMultiplier,
+    additionalMultiplier = 1,
+    additionalMultiplierLabel = null,
     randomRoll,
     randomMultiplier,
     damageBonusBreakdown = [{ source: 'base', operation: 'set', value: 1 }],
@@ -5061,7 +5064,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     const steps = [];
     let order = 1;
     const afterSkill = baseATK * skillMultiplier;
-    const afterRandom = afterSkill * randomMultiplier;
+    const afterAdditional = afterSkill * additionalMultiplier;
+    const afterRandom = afterAdditional * randomMultiplier;
     steps.push(damageStep({
       order: order++,
       label: 'base_attack',
@@ -5080,12 +5084,24 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       valueBeforeRounding: afterSkill,
       after: afterSkill,
     }));
+    if (additionalMultiplierLabel) {
+      steps.push(damageStep({
+        order: order++,
+        label: additionalMultiplierLabel,
+        expression: `${afterSkill} * ${additionalMultiplier}`,
+        inputs: { source: additionalMultiplierLabel },
+        before: afterSkill,
+        multiplier: additionalMultiplier,
+        valueBeforeRounding: afterAdditional,
+        after: afterAdditional,
+      }));
+    }
     steps.push(damageStep({
       order: order++,
       label: 'random_multiplier',
-      expression: `${afterSkill} * ${randomMultiplier}`,
+      expression: `${afterAdditional} * ${randomMultiplier}`,
       inputs: { randomRoll, randomMultiplier },
-      before: afterSkill,
+      before: afterAdditional,
       multiplier: randomMultiplier,
       valueBeforeRounding: afterRandom,
       after: afterRandom,
@@ -5789,7 +5805,9 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       toxicFrenzyRatio = baseRatio + stackRatio * (atk.poisonStacks || 0);
     }
 
-    const baseATK = atk.getATK() + (atk.hunterMarkBonus || 0);
+    const attackAfterExistingBuffs = atk.getATK();
+    const fixedAttackBonus = atk.hunterMarkBonus || 0;
+    const baseATK = attackAfterExistingBuffs + fixedAttackBonus;
     const mainRandomStart = currentRandomLog ? currentRandomLog.length : 0;
     const varianceRoll = rand('damage_variance_main');
     const variance = 0.95 + varianceRoll * 0.10;
@@ -5846,6 +5864,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     const damageBonusBreakdown = [{ source: 'base', operation: 'set', value: 1 }];
     const defenseMultiplierBreakdown = [{ source: 'base', operation: 'set', value: 1 }];
     let defenderHardenTriggered = false;
+    let defenderHardenReduction = 0;
     if (def.damageBonusTurns > 0) {
       damageBonusBreakdown.push({ source: 'damage_bonus_status', operation: 'add', value: def.damageBonusPercent, before: dmgMult, after: dmgMult + def.damageBonusPercent });
       dmgMult += def.damageBonusPercent;
@@ -5854,8 +5873,9 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     dmgMult += def.tormentBonus; // 折磨: 被弾側の永続デバフ
     const damageBonusMultiplierForLog = dmgMult;
     if (def.hardenReady) {
-      defenseMultiplierBreakdown.push({ source: '防御-硬化皮膚', operation: 'subtract', value: def.hardenParam || 0.20, before: dmgMult, after: Math.max(0, dmgMult - (def.hardenParam || 0.20)) });
-      dmgMult = Math.max(0, dmgMult - (def.hardenParam || 0.20));
+      defenderHardenReduction = def.hardenParam ?? 0;
+      defenseMultiplierBreakdown.push({ source: '防御-硬化皮膚', operation: 'subtract', value: defenderHardenReduction, before: dmgMult, after: Math.max(0, dmgMult - defenderHardenReduction) });
+      dmgMult = Math.max(0, dmgMult - defenderHardenReduction);
       defenderHardenTriggered = true;
       def.hardenReady = false;
       def.hardenSource = null;
@@ -5924,6 +5944,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       fullPowerHiddenMultiplier: atkSkill?.effect === 'full_power' ? fullPowerHiddenMultiplier : null,
       defenderDamageMultiplier: dmgMult,
       hardenTriggered: defenderHardenTriggered,
+      hardenReduction: defenderHardenReduction,
       displayed: dmg,
       rawFinalDamage,
       roundingMethod: 'Math.round',
@@ -5952,6 +5973,41 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       skillCalculation,
       rng: makeRngInfo('damage_variance_main', varianceRoll, variance),
     });
+    if (atkSkill?.effect === 'full_power') {
+      const fullPowerCalculation = {
+        baseAttack: atk.baseATK,
+        attackBuffMultiplier: atk.baseATK ? baseATK / atk.baseATK : 1,
+        attackBuffMultiplierSource: 'effectiveAttackUsed / baseAttack',
+        attackAfterExistingBuffs,
+        fixedAttackBonus,
+        effectiveAttackUsed: baseATK,
+        skillMultiplier: skillRatio,
+        fullPowerHiddenMultiplier,
+        randomRoll: varianceRoll,
+        randomMultiplier: variance,
+        damageBeforeReductionBeforeRandom: baseATK * skillRatio * fullPowerHiddenMultiplier,
+        damageBeforeReduction: baseATK * skillRatio * fullPowerHiddenMultiplier * variance,
+        damageReductionMultiplier: dmgMult,
+        finalDamageBeforeRounding: rawFinalDamage,
+        roundingMethod: 'Math.round',
+        finalDamage: dmg,
+        recalculatedFinalDamage: Math.round(
+          atk.baseATK *
+          (atk.baseATK ? baseATK / atk.baseATK : 1) *
+          skillRatio *
+          fullPowerHiddenMultiplier *
+          dmgMult *
+          variance
+        ),
+        hiddenMultiplierApplicationCount: 1,
+        randomPurpose: 'damage_variance_main',
+        randomRange: { min: 0.95, max: 1.05 },
+      };
+      fullPowerCalculation.matchesFinalDamage =
+        fullPowerCalculation.recalculatedFinalDamage === fullPowerCalculation.finalDamage;
+      mainDamageInfo.fullPowerCalculation = fullPowerCalculation;
+      mainDamageDebug.fullPowerCalculation = fullPowerCalculation;
+    }
     if (tryDefenseDodge(def)) {
       recordAnalysis({
         eventType: 'hit',
@@ -6311,7 +6367,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             stateBefore: comboStateBefore,
             defense: comboDefenseInfo,
             dodge: mainDodgeInfo,
-            damage: { type: 'combo', ratio: comboRatio, displayed: 0, dodged: true },
+            damage: { type: 'combo', ratio: comboRatio, secondHitMultiplier: COMBO_SECOND_HIT_DAMAGE_MULTIPLIER, displayed: 0, dodged: true },
             rage: { actor: comboActorRageSteps, target: comboTargetRageSteps },
             stateAfter: { actor: fighterState(atk), target: fighterState(comboTarget) },
           });
@@ -6336,7 +6392,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             stateBefore: comboStateBefore,
             defense: comboDefenseInfo,
             dodge: { checked: true, type: 'first_dodge', success: true },
-            damage: { type: 'combo', ratio: comboRatio, displayed: 0, dodged: true },
+            damage: { type: 'combo', ratio: comboRatio, secondHitMultiplier: COMBO_SECOND_HIT_DAMAGE_MULTIPLIER, displayed: 0, dodged: true },
             rage: { actor: comboActorRageSteps, target: comboTargetRageSteps },
             stateAfter: { actor: fighterState(atk), target: fighterState(comboTarget) },
           });
@@ -6366,16 +6422,19 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           }
           const comboBaseATK = atk.getATK() + (atk.hunterMarkBonus || 0);
           const comboRandoms = developerLog && currentRandomLog ? currentRandomLog.slice(comboRandomStart) : undefined;
-          const comboRawDamage = comboBaseATK * comboRatio * comboVariance * comboMult;
+          const comboAppliedRatio = comboRatio * COMBO_SECOND_HIT_DAMAGE_MULTIPLIER;
+          const comboRawDamage = comboBaseATK * comboAppliedRatio * comboVariance * comboMult;
           const comboDmg = Math.round(comboRawDamage);
           const comboSkillCalculation = {
             skillId: 'combo',
             skillName: skillName(atkSkill),
             hitIndex: 2,
             configuredRatio: comboRatio,
-            appliedRatio: comboRatio,
+            appliedRatio: comboAppliedRatio,
             source: 'getParam(combo.param)',
             skillLevel: 4,
+            secondHitMultiplier: COMBO_SECOND_HIT_DAMAGE_MULTIPLIER,
+            secondHitMultiplierSource: 'combo_second_hit_only',
           };
           const comboHpBefore = comboTarget.hp;
           const comboMaxHpBefore = comboTarget.maxHP;
@@ -6409,6 +6468,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               baseATK: comboBaseATK,
               baseLabel: 'comboBaseATK',
               skillMultiplier: comboRatio,
+              additionalMultiplier: COMBO_SECOND_HIT_DAMAGE_MULTIPLIER,
+              additionalMultiplierLabel: 'combo_second_hit_multiplier',
               randomRoll: comboVarianceRoll,
               randomMultiplier: comboVariance,
               damageBonusBreakdown: comboDamageBonusBreakdown,
@@ -6418,7 +6479,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               finalDamage: comboDmg,
               skillLabel: skillName(atkSkill),
             }),
-            formula: 'Math.round(comboBaseATK * comboRatio * comboVariance * comboMult)',
+            formula: 'Math.round(comboBaseATK * comboRatio * 1.05 * comboVariance * comboMult)',
             damageBonusBreakdown: comboDamageBonusBreakdown,
             defenseMultiplierBreakdown: comboDefenseMultiplierBreakdown,
             skillCalculation: comboSkillCalculation,
@@ -6546,6 +6607,8 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
               type: 'combo',
               baseATK: comboBaseATK,
               ratio: comboRatio,
+              secondHitMultiplier: COMBO_SECOND_HIT_DAMAGE_MULTIPLIER,
+              appliedRatio: comboAppliedRatio,
               variance: comboVariance,
               varianceRoll: comboVarianceRoll,
               defenderDamageMultiplier: comboMult,
@@ -6724,7 +6787,11 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             const benched = defTeam[i];
             if (benched.hp > 0) {
               const benchStateBefore = { actor: fighterState(atk), target: fighterState(benched) };
-              const benchRawDamage = baseATK * benchRatio * variance;
+              const benchHardenMultiplier = defenderHardenTriggered
+                ? Math.max(0, 1 - defenderHardenReduction)
+                : 1;
+              const benchRawBeforeHarden = baseATK * benchRatio * variance;
+              const benchRawDamage = benchRawBeforeHarden * benchHardenMultiplier;
               const benchDmg = Math.round(benchRawDamage);
               const benchHpBefore = benched.hp;
               const benchMaxHpBefore = benched.maxHP;
@@ -6744,12 +6811,21 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
                 actor: fighterRef(atk),
                 target: fighterRef(benched),
                 stateBefore: benchStateBefore,
-                defense: { triggered: false, reason: 'bench_damage_no_defense_check' },
+                defense: {
+                  triggered: false,
+                  reason: 'bench_damage_no_defense_check',
+                  inheritedMainTargetHarden: defenderHardenTriggered,
+                  hardenReduction: defenderHardenTriggered ? defenderHardenReduction : 0,
+                  damageReductionMultiplier: benchHardenMultiplier,
+                },
                 damage: {
                   type: 'quake_bench',
                   baseATK,
                   ratio: benchRatio,
                   variance,
+                  inheritedMainTargetHarden: defenderHardenTriggered,
+                  hardenReduction: defenderHardenTriggered ? defenderHardenReduction : 0,
+                  defenderDamageMultiplier: benchHardenMultiplier,
                   displayed: benchDmg,
                   hpBefore: benchHpBefore,
                   hpAfter: benched.hp,
@@ -6764,16 +6840,25 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
                     damageBonusMultiplier: 1,
                     randomRoll: varianceRoll,
                     randomMultiplier: variance,
-                    defenseMultiplier: 1,
+                    defenseMultiplier: benchHardenMultiplier,
                     valueBeforeRounding: benchRawDamage,
                     finalDamage: benchDmg,
                     steps: [
                       damageStep({ order: 1, label: 'base_attack', expression: 'baseATK', inputs: { baseATK }, valueBeforeRounding: baseATK, after: baseATK }),
                       damageStep({ order: 2, label: 'skill_multiplier', expression: `${baseATK} * ${benchRatio}`, before: baseATK, multiplier: benchRatio, valueBeforeRounding: baseATK * benchRatio, after: baseATK * benchRatio }),
-                      damageStep({ order: 3, label: 'random_multiplier', expression: `${baseATK * benchRatio} * ${variance}`, inputs: { randomRoll: varianceRoll, randomMultiplier: variance }, before: baseATK * benchRatio, multiplier: variance, valueBeforeRounding: benchRawDamage, after: benchRawDamage }),
-                      damageStep({ order: 4, label: 'final_rounding', expression: `Math.round(${benchRawDamage})`, before: benchRawDamage, roundingMethod: 'Math.round', after: benchDmg }),
+                      damageStep({ order: 3, label: 'random_multiplier', expression: `${baseATK * benchRatio} * ${variance}`, inputs: { randomRoll: varianceRoll, randomMultiplier: variance }, before: baseATK * benchRatio, multiplier: variance, valueBeforeRounding: benchRawBeforeHarden, after: benchRawBeforeHarden }),
+                      ...(defenderHardenTriggered ? [
+                        damageStep({ order: 4, label: 'inherited_main_harden_multiplier', expression: `${benchRawBeforeHarden} * ${benchHardenMultiplier}`, inputs: { hardenReduction: defenderHardenReduction }, before: benchRawBeforeHarden, multiplier: benchHardenMultiplier, valueBeforeRounding: benchRawDamage, after: benchRawDamage }),
+                      ] : []),
+                      damageStep({ order: defenderHardenTriggered ? 5 : 4, label: 'final_rounding', expression: `Math.round(${benchRawDamage})`, before: benchRawDamage, roundingMethod: 'Math.round', after: benchDmg }),
                     ],
-                    formula: 'Math.round(baseATK * benchRatio * variance)',
+                    formula: 'Math.round(baseATK * benchRatio * variance * inheritedMainHardenMultiplier)',
+                    defenseMultiplierBreakdown: defenderHardenTriggered
+                      ? [
+                          { source: 'base', operation: 'set', value: 1 },
+                          { source: 'main_target_harden', operation: 'multiply', value: benchHardenMultiplier, hardenReduction: defenderHardenReduction },
+                        ]
+                      : [{ source: 'base', operation: 'set', value: 1 }],
                     skillCalculation: { skillId: 'quake', skillName: skillName(atkSkill), hitIndex: `bench-${i}`, configuredRatio: benchRatio, appliedRatio: benchRatio, source: 'getParam(quake.param2)' },
                     rng: makeRngInfo('damage_variance_main', varianceRoll, variance),
                   }),
@@ -6799,7 +6884,13 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
                     }),
                     maxHpCalculation: { maxHpBefore: benchMaxHpBefore, steps: [], maxHpAfter: benched.maxHP },
                   }),
-                  defense: { triggered: false, reason: 'bench_damage_no_defense_check' },
+                  defense: {
+                    triggered: false,
+                    reason: 'bench_damage_no_defense_check',
+                    inheritedMainTargetHarden: defenderHardenTriggered,
+                    hardenReduction: defenderHardenTriggered ? defenderHardenReduction : 0,
+                    damageReductionMultiplier: benchHardenMultiplier,
+                  },
                 }),
                 stateAfter: { actor: fighterState(atk), target: fighterState(benched) },
               });
