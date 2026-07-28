@@ -4327,6 +4327,8 @@ class Fighter {
     this.hardenReady = false;
     this.hardenSource = null;
     this.attackCount = 0;
+    this.dakentrulusAttackDownDebuff = null;
+    this.dakentrulusAttackUpScheduledEffect = null;
     this.slowEffects = [];
     this.attackRageBonus = 0;
     this.rapidAtkPenalty = 0;
@@ -4406,8 +4408,27 @@ class Fighter {
         rounding: 'Math.round',
       });
     }
+    if (bc.effect === 'waver') {
+      const attackUp = getParam(this.data, 'waver', 'param', bc.param || 0.15);
+      const attackDown = getParam(this.data, 'waver', 'param2', bc.param2 || 0.10);
+      this.dakentrulusAttackDownDebuff = {
+        active: true,
+        cleansed: false,
+        attackDown,
+        startsAtAttackCount: this.attackCount,
+        endsAtAttackCount: this.attackCount + 3,
+        remainingTurns: 3,
+      };
+      this.dakentrulusAttackUpScheduledEffect = {
+        scheduled: true,
+        active: false,
+        attackUp,
+        startsAtAttackCount: this.attackCount + 3,
+        endsAtAttackCount: this.attackCount + 6,
+        remainingTurns: 3,
+      };
+    }
     // torment は applyEntryBattleCries() で両者に適用するためここでは処理しない
-    // waver は動的に処理
   }
 
   hasPassive(effect) {
@@ -4422,7 +4443,35 @@ class Fighter {
     return this.data.skills.some(s => s.effect === effect && (!type || s.type === type));
   }
 
+  syncDakentrulusWaverState() {
+    const down = this.dakentrulusAttackDownDebuff;
+    if (down) {
+      if (!down.cleansed) {
+        down.active = this.attackCount < down.endsAtAttackCount;
+        down.remainingTurns = down.active
+          ? Math.max(0, down.endsAtAttackCount - this.attackCount)
+          : 0;
+      } else {
+        down.active = false;
+        down.remainingTurns = 0;
+      }
+    }
+    const up = this.dakentrulusAttackUpScheduledEffect;
+    if (up) {
+      up.scheduled = this.attackCount < up.startsAtAttackCount;
+      up.active =
+        this.attackCount >= up.startsAtAttackCount &&
+        this.attackCount < up.endsAtAttackCount;
+      up.remainingTurns = up.active
+        ? Math.max(0, up.endsAtAttackCount - this.attackCount)
+        : up.scheduled
+          ? 3
+          : 0;
+    }
+  }
+
   getATK() {
+    this.syncDakentrulusWaverState();
     let mult = 1.0;
 
     // パッシブ野性: HP10%減るたびに攻撃力UP
@@ -4443,12 +4492,11 @@ class Fighter {
 
     if (this.weakAtkTurns > 0) mult *= (1 - this.weakAtkParam);
 
-    // 戦吼-動揺
-    if (this.hasBattleCry('waver')) {
-      const waverBonus   = getParam(this.data, 'waver', 'param',  0.15);
-      const waverPenalty = getParam(this.data, 'waver', 'param2', 0.10);
-      if (this.attackCount < 3) mult *= (1 - waverPenalty);
-      else if (this.attackCount < 6) mult *= (1 + waverBonus);
+    if (this.dakentrulusAttackDownDebuff?.active) {
+      mult *= (1 - this.dakentrulusAttackDownDebuff.attackDown);
+    }
+    if (this.dakentrulusAttackUpScheduledEffect?.active) {
+      mult *= (1 + this.dakentrulusAttackUpScheduledEffect.attackUp);
     }
 
     return Math.max(1, Math.round(this.baseATK * mult) - (this.poisonStacks || 0));
@@ -4576,6 +4624,12 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       skillSealTurns: fighter.skillSealTurns || 0,
       damageBonusTurns: fighter.damageBonusTurns || 0,
       lacerateTurns: fighter.lacerateTurns || 0,
+      dakentrulusAttackDownDebuff: fighter.dakentrulusAttackDownDebuff
+        ? { ...fighter.dakentrulusAttackDownDebuff }
+        : null,
+      dakentrulusAttackUpScheduledEffect: fighter.dakentrulusAttackUpScheduledEffect
+        ? { ...fighter.dakentrulusAttackUpScheduledEffect }
+        : null,
       slowEffects: fighter.slowEffects.map(effect => ({
         id: effect.id,
         sourceInstanceId: effect.sourceInstanceId,
@@ -4858,6 +4912,130 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     }));
     steps.push(damageStep({
       order: order++,
+      label: 'rounding',
+      expression: `Math.round(${finalRaw})`,
+      inputs: { stage: 'final_damage' },
+      before: finalRaw,
+      roundingMethod: 'Math.round',
+      after: finalDamage,
+    }));
+    return steps;
+  };
+  const fullPowerDamageSteps = ({
+    baseATK,
+    skillMultiplier,
+    hiddenMultiplier,
+    damageBonusBreakdown,
+    defenseMultiplierBreakdown,
+    defenseMultiplier,
+    randomRoll,
+    randomMultiplier,
+    finalRaw,
+    finalDamage,
+    skillLabel,
+  }) => {
+    const steps = [];
+    let order = 1;
+    let runningDamage = baseATK;
+    steps.push(damageStep({
+      order: order++,
+      label: 'base_attack',
+      expression: 'baseATK',
+      inputs: { baseATK },
+      valueBeforeRounding: baseATK,
+      after: baseATK,
+    }));
+    let after = runningDamage * skillMultiplier;
+    steps.push(damageStep({
+      order: order++,
+      label: 'skill_multiplier',
+      expression: `${runningDamage} * ${skillMultiplier}`,
+      inputs: { skill: skillLabel, skillMultiplier },
+      before: runningDamage,
+      multiplier: skillMultiplier,
+      valueBeforeRounding: after,
+      after,
+    }));
+    runningDamage = after;
+    after = runningDamage * hiddenMultiplier;
+    steps.push(damageStep({
+      order: order++,
+      label: 'full_power_hidden_multiplier',
+      expression: `${runningDamage} * ${hiddenMultiplier}`,
+      inputs: { source: 'full_power_hidden_damage_modifier' },
+      before: runningDamage,
+      multiplier: hiddenMultiplier,
+      valueBeforeRounding: after,
+      after,
+    }));
+    runningDamage = after;
+
+    let runningMultiplier = 1;
+    steps.push(damageStep({
+      order: order++,
+      label: 'target_multiplier_base',
+      expression: 'let dmgMult = 1',
+      inputs: { source: 'base' },
+      after: runningMultiplier,
+    }));
+    for (const item of damageBonusBreakdown.slice(1)) {
+      const before = runningMultiplier;
+      runningMultiplier = item.after;
+      steps.push(damageStep({
+        order: order++,
+        label: 'damage_bonus_adjustment',
+        expression: `dmgMult = ${before} + ${item.value}`,
+        inputs: { source: item.source, operation: item.operation, value: item.value },
+        before,
+        after: runningMultiplier,
+      }));
+    }
+    steps.push(damageStep({
+      order: order++,
+      label: 'damage_bonus_multiplier',
+      expression: `const damageBonusMultiplierForLog = ${runningMultiplier}`,
+      inputs: { source: 'accumulated_damage_bonus' },
+      before: 1,
+      multiplier: runningMultiplier,
+      after: runningMultiplier,
+    }));
+    for (const item of defenseMultiplierBreakdown.slice(1)) {
+      const before = runningMultiplier;
+      runningMultiplier = item.after;
+      steps.push(damageStep({
+        order: order++,
+        label: 'defense_multiplier_adjustment',
+        expression: `dmgMult = Math.max(0, ${before} - ${item.value})`,
+        inputs: { source: item.source, operation: item.operation, value: item.value },
+        before,
+        after: runningMultiplier,
+      }));
+    }
+    after = runningDamage * defenseMultiplier;
+    steps.push(damageStep({
+      order: order++,
+      label: 'defense_multiplier',
+      expression: `${runningDamage} * ${defenseMultiplier}`,
+      inputs: { dmgMult: defenseMultiplier },
+      before: runningDamage,
+      multiplier: defenseMultiplier,
+      valueBeforeRounding: after,
+      after,
+    }));
+    runningDamage = after;
+    after = runningDamage * randomMultiplier;
+    steps.push(damageStep({
+      order: order++,
+      label: 'random_multiplier',
+      expression: `${runningDamage} * ${randomMultiplier}`,
+      inputs: { randomRoll, randomMultiplier },
+      before: runningDamage,
+      multiplier: randomMultiplier,
+      valueBeforeRounding: after,
+      after,
+    }));
+    steps.push(damageStep({
+      order,
       label: 'rounding',
       expression: `Math.round(${finalRaw})`,
       inputs: { stage: 'final_damage' },
@@ -5326,6 +5504,19 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       let removed = 0;
       const hpBeforePurify = def.hp;
       const maxHpBeforePurify = def.maxHP;
+      def.syncDakentrulusWaverState();
+      let dakentrulusAttackDownRemoved = null;
+      if (def.dakentrulusAttackDownDebuff?.active) {
+        const down = def.dakentrulusAttackDownDebuff;
+        dakentrulusAttackDownRemoved = {
+          remainingTurnsBefore: down.remainingTurns,
+          attackDown: down.attackDown,
+        };
+        down.active = false;
+        down.cleansed = true;
+        down.remainingTurns = 0;
+        removed++;
+      }
       if (def.damageBonusTurns > 0) { def.damageBonusTurns = Math.max(0, def.damageBonusTurns - 2); removed++; }
       if (def.slowEffects.length > 0) {
         const purifyTarget = def.slowEffects[0];
@@ -5345,6 +5536,10 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         hpAfter: def.hp,
         maxHpBefore: maxHpBeforePurify,
         maxHpAfter: def.maxHP,
+        dakentrulusAttackDownRemoved,
+        dakentrulusAttackUpScheduledEffect: def.dakentrulusAttackUpScheduledEffect
+          ? { ...def.dakentrulusAttackUpScheduledEffect }
+          : null,
       };
       push('log-buff', t('purifyUse', fighterName(def), skillName(defReactSkill), Math.min(removed*2,2), heal));
     }
@@ -5602,6 +5797,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     let firstDamageRaw = baseATK * variance;
     let dmg = Math.round(firstDamageRaw);
     let skillRatio = atkSkill ? 1 : null;
+    let fullPowerHiddenMultiplier = 1;
     let skillCalculation = {
       skillId: atkSkill?.effect || null,
       skillName: atkSkill ? skillName(atkSkill) : null,
@@ -5615,9 +5811,20 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     if (atkSkill?.effect === 'full_power') {
       const fullPowerRatio = getParam(atk.data, 'full_power', 'param', atkSkill.param || 2.30);
       skillRatio = fullPowerRatio;
-      firstDamageRaw = baseATK * fullPowerRatio * variance;
-      dmg = Math.round(firstDamageRaw);
-      skillCalculation = { skillId: 'full_power', skillName: skillName(atkSkill), hitIndex: 1, configuredRatio: fullPowerRatio, appliedRatio: fullPowerRatio, source: 'getParam(full_power.param)', skillLevel: 4 };
+      fullPowerHiddenMultiplier = 0.9;
+      firstDamageRaw = baseATK * fullPowerRatio * fullPowerHiddenMultiplier;
+      dmg = Math.round(firstDamageRaw * variance);
+      skillCalculation = {
+        skillId: 'full_power',
+        skillName: skillName(atkSkill),
+        hitIndex: 1,
+        configuredRatio: fullPowerRatio,
+        appliedRatio: fullPowerRatio,
+        source: 'getParam(full_power.param)',
+        skillLevel: 4,
+        hiddenDamageMultiplier: fullPowerHiddenMultiplier,
+        hiddenDamageMultiplierSource: 'full_power_only',
+      };
     }
     // 大地震撼: スキル倍率ダメージのみ。追加通常攻撃は発生しない。
     if (atkSkill?.effect === 'quake') {
@@ -5660,23 +5867,45 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       def.toxicSkinReady = false;
       push('log-buff', t('toxicSkinTriggered', fighterName(def)));
     }
-    const dmgBeforeDefenseMult = dmg;
-    dmg = Math.round(dmg * dmgMult);
-    const damageSteps = orderedDamageSteps({
-      baseATK,
-      randomRoll: varianceRoll,
-      randomMultiplier: variance,
-      skillMultiplier: skillRatio || 1,
-      skillApplied: ['full_power', 'quake', 'toxic_frenzy'].includes(atkSkill?.effect),
-      firstRaw: firstDamageRaw,
-      firstRounded: dmgBeforeDefenseMult,
-      damageBonusBreakdown,
-      defenseMultiplierBreakdown,
-      defenseMultiplier: dmgMult,
-      finalRaw: dmgBeforeDefenseMult * dmgMult,
-      finalDamage: dmg,
-      skillLabel: skillCalculation.skillName,
-    });
+    let dmgBeforeDefenseMult = dmg;
+    let rawFinalDamage;
+    let damageSteps;
+    if (atkSkill?.effect === 'full_power') {
+      dmgBeforeDefenseMult = firstDamageRaw;
+      rawFinalDamage = firstDamageRaw * dmgMult * variance;
+      dmg = Math.round(rawFinalDamage);
+      damageSteps = fullPowerDamageSteps({
+        baseATK,
+        skillMultiplier: skillRatio,
+        hiddenMultiplier: fullPowerHiddenMultiplier,
+        damageBonusBreakdown,
+        defenseMultiplierBreakdown,
+        defenseMultiplier: dmgMult,
+        randomRoll: varianceRoll,
+        randomMultiplier: variance,
+        finalRaw: rawFinalDamage,
+        finalDamage: dmg,
+        skillLabel: skillCalculation.skillName,
+      });
+    } else {
+      dmg = Math.round(dmg * dmgMult);
+      rawFinalDamage = dmgBeforeDefenseMult * dmgMult;
+      damageSteps = orderedDamageSteps({
+        baseATK,
+        randomRoll: varianceRoll,
+        randomMultiplier: variance,
+        skillMultiplier: skillRatio || 1,
+        skillApplied: ['quake', 'toxic_frenzy'].includes(atkSkill?.effect),
+        firstRaw: firstDamageRaw,
+        firstRounded: dmgBeforeDefenseMult,
+        damageBonusBreakdown,
+        defenseMultiplierBreakdown,
+        defenseMultiplier: dmgMult,
+        finalRaw: rawFinalDamage,
+        finalDamage: dmg,
+        skillLabel: skillCalculation.skillName,
+      });
+    }
     // Temporary game-bug emulation: when Earthshaking Quake is reduced by the
     // defender's Hardened Skin, a beast that also has Hardened Skin receives a
     // free one-hit harden reservation. This does not consume defense rage.
@@ -5692,10 +5921,11 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       variance,
       varianceRoll,
       skillRatio,
+      fullPowerHiddenMultiplier: atkSkill?.effect === 'full_power' ? fullPowerHiddenMultiplier : null,
       defenderDamageMultiplier: dmgMult,
       hardenTriggered: defenderHardenTriggered,
       displayed: dmg,
-      rawFinalDamage: dmgBeforeDefenseMult * dmgMult,
+      rawFinalDamage,
       roundingMethod: 'Math.round',
       steps: damageSteps,
       randoms: developerLog && currentRandomLog ? currentRandomLog.slice(mainRandomStart) : undefined,
@@ -5709,11 +5939,13 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       randomRoll: varianceRoll,
       randomMultiplier: variance,
       defenseMultiplier: dmgMult,
-      valueBeforeRounding: dmgBeforeDefenseMult * dmgMult,
+      valueBeforeRounding: rawFinalDamage,
       finalDamage: dmg,
       steps: damageSteps,
-      formula: ['full_power', 'quake', 'toxic_frenzy'].includes(atkSkill?.effect)
-        ? 'Math.round(Math.round(baseATK * skillMultiplier * randomMultiplier) * defenseMultiplier)'
+      formula: atkSkill?.effect === 'full_power'
+        ? 'Math.round(baseATK * skillMultiplier * 0.9 * defenseMultiplier * randomMultiplier)'
+        : ['quake', 'toxic_frenzy'].includes(atkSkill?.effect)
+          ? 'Math.round(Math.round(baseATK * skillMultiplier * randomMultiplier) * defenseMultiplier)'
         : 'Math.round(Math.round(baseATK * randomMultiplier) * defenseMultiplier)',
       damageBonusBreakdown,
       defenseMultiplierBreakdown,
