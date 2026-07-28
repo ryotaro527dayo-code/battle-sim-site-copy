@@ -716,6 +716,116 @@ const app = loadBattleSim();
 }
 
 {
+  const runComboCase = (id, ratio, firstTargetDur, includeBench = false) => {
+    const attacker = beast(`test_combo_multiplier_attacker_${id}`, `Combo Multiplier Attacker ${id}`, {
+      agi: 200, atk: 100, dur: 1000, will: 1,
+    }, [
+      { name: '攻撃-連撃', type: 'attack', rageCost: 0, effect: 'combo', param: ratio },
+    ]);
+    const firstTarget = beast(`test_combo_multiplier_target_${id}`, `Combo Multiplier Target ${id}`, {
+      agi: 100, atk: 1, dur: firstTargetDur, will: 1,
+    }, []);
+    const defenders = [firstTarget];
+    if (includeBench) {
+      defenders.push(beast(`test_combo_multiplier_bench_${id}`, `Combo Multiplier Bench ${id}`, {
+        agi: 100, atk: 1, dur: 1000, will: 1,
+      }, []));
+    }
+    const result = app.withSeededRandom(1301, () =>
+      app.simulateBattle6v6([attacker], defenders, true, { analysisMode: 'developer' })
+    );
+    return result.analysisEvents.find(event =>
+      event.eventType === 'hit' &&
+      event.hitIndex === 2 &&
+      event.actor?.beastId === attacker.id
+    );
+  };
+
+  const normalSecondHit = runComboCase('normal', 0.80, 1000);
+  const levelSpecificSecondHit = runComboCase('level_specific', 0.70, 1000);
+  const carryoverSecondHit = runComboCase('carryover', 0.80, 1, true);
+
+  for (const [event, baseRatio] of [
+    [normalSecondHit, 0.80],
+    [levelSpecificSecondHit, 0.70],
+    [carryoverSecondHit, 0.80],
+  ]) {
+    assert(event, 'combo second hit must be recorded');
+    assert.strictEqual(event.damage.ratio, baseRatio, 'configured combo ratio must remain unchanged');
+    assert.strictEqual(event.damage.secondHitMultiplier, 1.05, 'combo second hit must expose its separate 1.05 multiplier');
+    assert.strictEqual(event.damage.appliedRatio, baseRatio * 1.05, 'applied ratio must derive from the configured ratio');
+    assert.strictEqual(
+      event.damage.displayed,
+      Math.round(event.damage.baseATK * baseRatio * 1.05 * event.damage.variance * event.damage.defenderDamageMultiplier),
+      'combo second-hit damage must apply the extra multiplier exactly once'
+    );
+    assert.strictEqual(
+      event.debugCalculation.damage.steps.filter(step => step.label === 'combo_second_hit_multiplier').length,
+      1,
+      'combo second-hit debug calculation must contain exactly one 1.05 step'
+    );
+    assert.strictEqual(
+      event.debugCalculation.damage.skillCalculation.configuredRatio,
+      baseRatio,
+      'skill calculation must preserve the level-specific base ratio'
+    );
+  }
+  assert(Math.abs(normalSecondHit.damage.appliedRatio - 0.84) < 1e-12, '80% combo ratio must become 84% only after applying 1.05');
+  assert(Math.abs(levelSpecificSecondHit.damage.appliedRatio - 0.735) < 1e-12, '70% combo ratio must not be replaced by a fixed 84%');
+  assert.strictEqual(carryoverSecondHit.hitType, 'combo_carryover', 'carryover second hit must use the same additional multiplier');
+}
+
+{
+  const runQuakeBenchCase = (id, hardenParam = null) => {
+    const attacker = beast(`test_quake_bench_attacker_${id}`, `Quake Bench Attacker ${id}`, {
+      agi: 200, atk: 100, dur: 1000, will: 1,
+    }, [
+      { name: '攻撃-大地震撼', type: 'attack', rageCost: 0, effect: 'quake', param: 1.50, param2: 0.20 },
+    ]);
+    const mainSkills = hardenParam == null ? [] : [
+      { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: hardenParam },
+    ];
+    const mainTarget = beast(`test_quake_bench_main_${id}`, `Quake Bench Main ${id}`, {
+      agi: 100, atk: 1, dur: 1000, will: 1,
+    }, mainSkills);
+    const benchTarget = beast(`test_quake_bench_reserve_${id}`, `Quake Bench Reserve ${id}`, {
+      agi: 100, atk: 1, dur: 1000, will: 1,
+    }, []);
+    const result = app.withSeededRandom(1302, () =>
+      app.simulateBattle6v6([attacker], [mainTarget, benchTarget], true, { analysisMode: 'developer' })
+    );
+    return result.analysisEvents.find(event =>
+      event.eventType === 'hit' &&
+      event.hitType === 'quake_bench' &&
+      event.target?.beastId === benchTarget.id
+    );
+  };
+
+  const hardenedBenchHit = runQuakeBenchCase('hardened', 0.30);
+  const plainBenchHit = runQuakeBenchCase('plain');
+
+  assert.strictEqual(hardenedBenchHit.damage.hardenReduction, 0.30, 'bench damage must use the main target harden skill value');
+  assert.strictEqual(hardenedBenchHit.damage.defenderDamageMultiplier, 0.70);
+  assert.strictEqual(
+    hardenedBenchHit.damage.displayed,
+    Math.round(hardenedBenchHit.damage.baseATK * 0.20 * hardenedBenchHit.damage.variance * 0.70),
+    'quake bench damage must inherit main-target harden exactly once'
+  );
+  assert.strictEqual(
+    hardenedBenchHit.debugCalculation.damage.steps.filter(step => step.label === 'inherited_main_harden_multiplier').length,
+    1,
+    'quake bench debug calculation must contain one inherited harden step'
+  );
+  assert.strictEqual(plainBenchHit.damage.inheritedMainTargetHarden, false);
+  assert.strictEqual(plainBenchHit.damage.defenderDamageMultiplier, 1);
+  assert.strictEqual(
+    plainBenchHit.damage.displayed,
+    Math.round(plainBenchHit.damage.baseATK * 0.20 * plainBenchHit.damage.variance),
+    'quake bench damage must remain unchanged when main harden did not trigger'
+  );
+}
+
+{
   const runDamageCase = (id, skills, defenderSkills = []) => {
     const attacker = beast(`test_damage_scope_attacker_${id}`, `Damage Scope Attacker ${id}`, {
       agi: 200, atk: 100, dur: 1000, will: 1,
@@ -748,6 +858,10 @@ const app = loadBattleSim();
   ], [
     { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
   ]);
+  const buffedFullPowerHit = runDamageCase('full_power_buffed', [
+    { name: '攻撃-全力一撃', type: 'attack', rageCost: 0, effect: 'full_power', param: 2.30 },
+    { name: '戦吼-奉納', type: 'battlecry', effect: 'sacrifice', param: 0.10, param2: 0.225 },
+  ]);
 
   const variance = fullPowerLv4Hit.damage.variance;
   assert.strictEqual(
@@ -768,6 +882,48 @@ const app = loadBattleSim();
       step.label === 'full_power_hidden_multiplier' && step.multiplier === 0.9
     ),
     'full power debug steps must expose the skill-only hidden multiplier'
+  );
+  for (const hit of [fullPowerLv4Hit, fullPowerLv2Hit, hardenedFullPowerHit, buffedFullPowerHit]) {
+    const calculation = hit.debugCalculation.damage.fullPowerCalculation;
+    assert(calculation, 'every full-power hit must expose its dedicated calculation values');
+    assert.strictEqual(calculation.fullPowerHiddenMultiplier, 0.9);
+    assert.strictEqual(calculation.hiddenMultiplierApplicationCount, 1, 'hidden 0.9 must be applied exactly once');
+    assert(calculation.randomMultiplier >= 0.95 && calculation.randomMultiplier <= 1.05);
+    assert.strictEqual(calculation.randomMultiplier, hit.damage.variance, 'logged random multiplier must be the damage multiplier actually used');
+    assert.strictEqual(
+      calculation.randomMultiplier,
+      hit.debugCalculation.damage.rng.convertedValue,
+      'full power calculation and RNG event must reference the same converted random value'
+    );
+    assert(
+      Math.abs(
+        calculation.damageBeforeReduction -
+        calculation.baseAttack *
+        calculation.attackBuffMultiplier *
+        calculation.skillMultiplier *
+        calculation.fullPowerHiddenMultiplier *
+        calculation.randomMultiplier
+      ) < 1e-10,
+      'logged pre-reduction damage must match the displayed full-power factors'
+    );
+    assert(
+      Math.abs(
+        calculation.finalDamageBeforeRounding -
+        calculation.damageBeforeReduction * calculation.damageReductionMultiplier
+      ) < 1e-10,
+      'logged reduction multiplier must reproduce the final unrounded damage'
+    );
+    assert.strictEqual(calculation.recalculatedFinalDamage, calculation.finalDamage);
+    assert.strictEqual(calculation.matchesFinalDamage, true, 'logged full-power values must reproduce final damage');
+    assert.strictEqual(calculation.finalDamage, hit.damage.displayed, 'full-power final damage must not be overwritten later');
+  }
+  assert.strictEqual(buffedFullPowerHit.debugCalculation.damage.fullPowerCalculation.baseAttack, 100);
+  assert.strictEqual(buffedFullPowerHit.debugCalculation.damage.fullPowerCalculation.attackAfterExistingBuffs, 123);
+  assert.strictEqual(buffedFullPowerHit.debugCalculation.damage.fullPowerCalculation.attackBuffMultiplier, 1.23);
+  assert.strictEqual(
+    buffedFullPowerHit.damage.displayed,
+    Math.round(100 * 1.23 * 2.30 * 0.9 * buffedFullPowerHit.damage.variance),
+    'full power must use the existing attack buff before its display ratio and hidden modifier'
   );
   assert.strictEqual(
     hardenedFullPowerHit.damage.displayed,
