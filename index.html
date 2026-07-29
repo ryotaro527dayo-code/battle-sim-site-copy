@@ -4283,6 +4283,7 @@ function applyOcrBatchImport() {
 // ===== バトルステート =====
 const ENABLE_QUAKE_HARDEN_LINK_BUG = false;
 const COMBO_SECOND_HIT_DAMAGE_MULTIPLIER = 1.05;
+const FULL_POWER_HIDDEN_DAMAGE_MULTIPLIER = 0.9;
 // 実機確認済み: 封印中は攻撃スキルとすべての防御スキルを発動しない。
 const SKILL_SEAL_BLOCKS_DEFENSE_SKILLS = true;
 const SpeedModifierType = Object.freeze({
@@ -5829,7 +5830,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     if (atkSkill?.effect === 'full_power') {
       const fullPowerRatio = getParam(atk.data, 'full_power', 'param', atkSkill.param || 2.30);
       skillRatio = fullPowerRatio;
-      fullPowerHiddenMultiplier = 0.9;
+      fullPowerHiddenMultiplier = FULL_POWER_HIDDEN_DAMAGE_MULTIPLIER;
       firstDamageRaw = baseATK * fullPowerRatio * fullPowerHiddenMultiplier;
       dmg = Math.round(firstDamageRaw * variance);
       skillCalculation = {
