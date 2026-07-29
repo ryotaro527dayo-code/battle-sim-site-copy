@@ -862,6 +862,16 @@ const app = loadBattleSim();
     { name: '攻撃-全力一撃', type: 'attack', rageCost: 0, effect: 'full_power', param: 2.30 },
     { name: '戦吼-奉納', type: 'battlecry', effect: 'sacrifice', param: 0.10, param2: 0.225 },
   ]);
+  const flameTailPtera = app.CHARS.flame_tail_ptera;
+  assert(flameTailPtera, 'Flametail Ptera must exist in the registered beast definitions');
+  const flameTailFullPower = flameTailPtera.skills.find(skill => skill.effect === 'full_power');
+  const flameTailSacrifice = flameTailPtera.skills.find(skill => skill.effect === 'sacrifice');
+  assert(flameTailFullPower, 'Flametail Ptera must have full power');
+  assert(flameTailSacrifice, 'Flametail Ptera must have sacrifice');
+  const flameTailFullPowerHit = runDamageCase('flame_tail_ptera_full_power', [
+    { ...flameTailFullPower, rageCost: 0 },
+    { ...flameTailSacrifice },
+  ]);
 
   const variance = fullPowerLv4Hit.damage.variance;
   assert.strictEqual(
@@ -883,7 +893,7 @@ const app = loadBattleSim();
     ),
     'full power debug steps must expose the skill-only hidden multiplier'
   );
-  for (const hit of [fullPowerLv4Hit, fullPowerLv2Hit, hardenedFullPowerHit, buffedFullPowerHit]) {
+  for (const hit of [fullPowerLv4Hit, fullPowerLv2Hit, hardenedFullPowerHit, buffedFullPowerHit, flameTailFullPowerHit]) {
     const calculation = hit.debugCalculation.damage.fullPowerCalculation;
     assert(calculation, 'every full-power hit must expose its dedicated calculation values');
     assert.strictEqual(calculation.fullPowerHiddenMultiplier, 0.9);
@@ -924,6 +934,16 @@ const app = loadBattleSim();
     buffedFullPowerHit.damage.displayed,
     Math.round(100 * 1.23 * 2.30 * 0.9 * buffedFullPowerHit.damage.variance),
     'full power must use the existing attack buff before its display ratio and hidden modifier'
+  );
+  assert.strictEqual(
+    flameTailFullPowerHit.damage.displayed,
+    Math.round(
+      flameTailFullPowerHit.debugCalculation.damage.fullPowerCalculation.effectiveAttackUsed *
+      flameTailFullPowerHit.debugCalculation.damage.fullPowerCalculation.skillMultiplier *
+      0.9 *
+      flameTailFullPowerHit.damage.variance
+    ),
+    'Flametail Ptera full power must apply the shared hidden 0.9 modifier after sacrifice'
   );
   assert.strictEqual(
     hardenedFullPowerHit.damage.displayed,
