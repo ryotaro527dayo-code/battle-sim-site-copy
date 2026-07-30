@@ -81,6 +81,14 @@ const TARGET_IDS = Object.freeze([
   'silver_frost_rex',
 ]);
 
+const PREVIOUSLY_UNRANKED_IDS = Object.freeze([
+  'triceratops',
+  'flame_tail_ptera',
+  'azure_stego',
+  'thunder_bull',
+  'dacentrurus',
+]);
+
 const OPPONENT_POOLS = Object.freeze([
   {
     name: '基準編成1',
@@ -402,7 +410,7 @@ function createCounters() {
   };
 }
 
-function runBattleWithCounters(app, createTeams, seed, counters) {
+function runBattleWithCounters(app, createTeams, seed, counters, context = {}) {
   let lastError;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) counters.retries++;
@@ -422,7 +430,20 @@ function runBattleWithCounters(app, createTeams, seed, counters) {
       lastError = error;
     }
   }
-  throw lastError;
+  const error = new Error(
+    `Battle failed after ${MAX_RETRIES + 1} attempts: ${lastError?.message || lastError}`
+  );
+  error.cause = lastError;
+  error.rankingContext = {
+    ...context,
+    seed,
+    error: {
+      name: lastError?.name || 'Error',
+      message: lastError?.message || String(lastError),
+      stack: lastError?.stack || null,
+    },
+  };
+  throw error;
 }
 
 function evaluateOne(app, ids, stageName, trials, counters) {
@@ -445,7 +466,12 @@ function evaluateOne(app, ids, stageName, trials, counters) {
         ),
       }),
       schedule.seed,
-      counters
+      counters,
+      {
+        stage: stageName,
+        candidateKey: comboKey(ids),
+        trial,
+      }
     );
     const opponentStats = stats.byOpponent[schedule.opponentPoolIndex];
     opponentStats.trials++;
@@ -500,7 +526,51 @@ function loadStageResult(stageName) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
-function evaluateStage(app, stageName, combos, counters, resumeCheckpoint = null) {
+function formatDuration(ms) {
+  if (!Number.isFinite(ms)) return null;
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function progressRecord(runtime, counters, details) {
+  const sessionElapsedMs = performance.now() - runtime.sessionStartMs;
+  const elapsedMs = runtime.priorElapsedMs + sessionElapsedMs;
+  const sessionCompleted = counters.completedBattles - runtime.initialCompletedBattles;
+  const battlesPerSecond = sessionElapsedMs > 0
+    ? sessionCompleted / (sessionElapsedMs / 1000)
+    : 0;
+  const remainingBattles = Math.max(0, PLANNED_BATTLES - counters.completedBattles);
+  const etaMs = battlesPerSecond > 0
+    ? remainingBattles / battlesPerSecond * 1000
+    : null;
+  const record = {
+    type: 'ranking-progress',
+    ...details,
+    completedBattles: counters.completedBattles,
+    plannedBattles: PLANNED_BATTLES,
+    errorBattles: counters.errorBattles,
+    retries: counters.retries,
+    elapsedMs,
+    elapsed: formatDuration(elapsedMs),
+    battlesPerSecond,
+    etaMs,
+    eta: formatDuration(etaMs),
+  };
+  console.log(JSON.stringify(record));
+  return record;
+}
+
+function evaluateStage(
+  app,
+  stageName,
+  combos,
+  counters,
+  resumeCheckpoint = null,
+  runtime
+) {
   const config = STAGES[stageName];
   const resumed =
     resumeCheckpoint?.stage === stageName &&
@@ -508,9 +578,55 @@ function evaluateStage(app, stageName, combos, counters, resumeCheckpoint = null
   const results = resumed ? resumeCheckpoint.partialResults : [];
   const startIndex = resumed ? resumeCheckpoint.completedCandidates : 0;
   const start = performance.now();
+  const stageElapsedBefore = resumed ? (resumeCheckpoint.stageElapsedMs || 0) : 0;
+  const counterStart = resumed
+    ? (resumeCheckpoint.stageCounterStart || { ...counters })
+    : { ...counters };
+  const progressEvery = Math.max(1, Math.ceil(combos.length / 10));
+
+  progressRecord(runtime, counters, {
+    status: 'stage-start',
+    stage: stageName,
+    completedCandidates: startIndex,
+    totalCandidates: combos.length,
+    stageCompletedBattles: results.length * config.trials,
+  });
 
   for (let index = startIndex; index < combos.length; index++) {
-    results.push(evaluateOne(app, combos[index], stageName, config.trials, counters));
+    try {
+      results.push(evaluateOne(app, combos[index], stageName, config.trials, counters));
+    } catch (error) {
+      const stageElapsedMs = stageElapsedBefore + performance.now() - start;
+      saveCheckpoint({
+        status: 'error',
+        stage: stageName,
+        completedCandidates: index,
+        totalCandidates: combos.length,
+        partialResults: results,
+        counters,
+        elapsedMs: runtime.priorElapsedMs + performance.now() - runtime.sessionStartMs,
+        stageElapsedMs,
+        stageCounterStart: counterStart,
+        failure: error.rankingContext || {
+          stage: stageName,
+          candidateKey: comboKey(combos[index]),
+          error: {
+            name: error.name,
+            message: error.message,
+            stack: error.stack,
+          },
+        },
+      });
+      progressRecord(runtime, counters, {
+        status: 'stopped-on-error',
+        stage: stageName,
+        completedCandidates: index,
+        totalCandidates: combos.length,
+        stageCompletedBattles: results.length * config.trials,
+        failure: error.rankingContext || null,
+      });
+      throw error;
+    }
     const completedCandidates = index + 1;
     if (
       completedCandidates % config.checkpointEvery === 0 ||
@@ -523,17 +639,34 @@ function evaluateStage(app, stageName, combos, counters, resumeCheckpoint = null
         totalCandidates: combos.length,
         partialResults: results,
         counters,
+        elapsedMs: runtime.priorElapsedMs + performance.now() - runtime.sessionStartMs,
+        stageElapsedMs: stageElapsedBefore + performance.now() - start,
+        stageCounterStart: counterStart,
       });
-      console.log(JSON.stringify({
+    }
+    if (
+      completedCandidates % progressEvery === 0 ||
+      completedCandidates === combos.length
+    ) {
+      progressRecord(runtime, counters, {
+        status: completedCandidates === combos.length ? 'stage-end' : 'stage-progress',
         stage: stageName,
         completedCandidates,
         totalCandidates: combos.length,
-        counters,
-      }));
+        stageCompletedBattles: completedCandidates * config.trials,
+      });
     }
   }
   results.sort(compareTeams);
-  return { results, elapsedMs: performance.now() - start };
+  return {
+    results,
+    elapsedMs: stageElapsedBefore + performance.now() - start,
+    plannedBattles: combos.length * config.trials,
+    startedBattles: counters.startedBattles - counterStart.startedBattles,
+    completedBattles: counters.completedBattles - counterStart.completedBattles,
+    errorBattles: counters.errorBattles - counterStart.errorBattles,
+    retries: counters.retries - counterStart.retries,
+  };
 }
 
 function evaluateOrResumeStage(
@@ -542,7 +675,8 @@ function evaluateOrResumeStage(
   combos,
   counters,
   checkpoint,
-  resume
+  resume,
+  runtime
 ) {
   if (resume) {
     const completed = loadStageResult(stageName);
@@ -555,7 +689,7 @@ function evaluateOrResumeStage(
       return completed;
     }
   }
-  const result = evaluateStage(app, stageName, combos, counters, checkpoint);
+  const result = evaluateStage(app, stageName, combos, counters, checkpoint, runtime);
   saveStageResult(stageName, result);
   return result;
 }
@@ -589,8 +723,11 @@ function buildBeastRanking(app, finalTop20, stage4Results, stage3Results) {
       id,
       name: app.CHARS[id].name,
       score: top50Rate * 0.45 + top20Rate * 0.45 + top100Rate * 0.10,
+      top20AdoptionCount: map20.get(id).count,
       top20AdoptionRate: top20Rate,
+      top50AdoptionCount: map50.get(id).count,
       top50AdoptionRate: top50Rate,
+      top100AdoptionCount: map100.get(id).count,
       top100AdoptionRate: top100Rate,
       adoptedTop20Count: adoptedTop20.length,
       adoptedTop20AverageWinRate: adoptedTop20.length
@@ -626,24 +763,72 @@ function buildPreviousRanking(app) {
   const maps = Object.fromEntries(
     ['top20', 'top50', 'top100'].map(key => [
       key,
-      new Map((adoptionSets[key] || []).map(item => [item.id, item.rate])),
+      new Map((adoptionSets[key] || []).map(item => [item.id, item])),
     ])
   );
+  const previousTop20 = previous.finalTop20 || [];
   const ranking = TARGET_IDS
     .filter(id => maps.top50.has(id))
-    .map(id => ({
-      id,
-      name: app.CHARS[id].name,
-      score:
-        (maps.top50.get(id) || 0) * 0.45 +
-        (maps.top20.get(id) || 0) * 0.45 +
-        (maps.top100.get(id) || 0) * 0.10,
-    }))
-    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, 'ja'));
+    .map(id => {
+      const top20Rate = maps.top20.get(id)?.rate || 0;
+      const top50Rate = maps.top50.get(id)?.rate || 0;
+      const top100Rate = maps.top100.get(id)?.rate || 0;
+      const adoptedTop20 = previousTop20.filter(result => result.ids?.includes(id));
+      return {
+        id,
+        name: app.CHARS[id].name,
+        score: top50Rate * 0.45 + top20Rate * 0.45 + top100Rate * 0.10,
+        top20AdoptionRate: top20Rate,
+        top50AdoptionRate: top50Rate,
+        top100AdoptionRate: top100Rate,
+        adoptedTop20AverageWinRate: adoptedTop20.length
+          ? adoptedTop20.reduce((sum, result) => sum + result.winRate, 0) / adoptedTop20.length
+          : 0,
+      };
+    })
+    .sort((a, b) =>
+      b.score - a.score ||
+      b.top20AdoptionRate - a.top20AdoptionRate ||
+      b.top50AdoptionRate - a.top50AdoptionRate ||
+      b.top100AdoptionRate - a.top100AdoptionRate ||
+      b.adoptedTop20AverageWinRate - a.adoptedTop20AverageWinRate ||
+      a.name.localeCompare(b.name, 'ja')
+    );
   ranking.forEach((item, index) => {
     item.rank = index + 1;
   });
   return ranking;
+}
+
+function buildCombinationSynergy(app, results, size, limit = 100) {
+  const selected = results.slice(0, Math.min(limit, results.length));
+  const counts = new Map();
+  for (const result of selected) {
+    const ids = [...result.ids].sort();
+    const visit = (start, picked) => {
+      if (picked.length === size) {
+        const key = picked.join('|');
+        counts.set(key, (counts.get(key) || 0) + 1);
+        return;
+      }
+      for (let index = start; index <= ids.length - (size - picked.length); index++) {
+        visit(index + 1, [...picked, ids[index]]);
+      }
+    };
+    visit(0, []);
+  }
+  return [...counts.entries()]
+    .map(([key, count]) => {
+      const ids = key.split('|');
+      return {
+        ids,
+        names: ids.map(id => app.CHARS[id].name),
+        count,
+        rate: selected.length ? count / selected.length : 0,
+      };
+    })
+    .sort((a, b) => b.count - a.count || a.names.join('/').localeCompare(b.names.join('/'), 'ja'))
+    .slice(0, 20);
 }
 
 function createReplacementCombos(bestTeam) {
@@ -676,30 +861,40 @@ function writeFinalOutputs(payload) {
   writeJsonAtomic(FINAL_JSON_PATH, payload);
   writeJsonAtomic(SEED_INFO_PATH, payload.seedInfo);
 
-  const previousMap = new Map(payload.previousRanking.map(item => [item.id, item.rank]));
   const csvRows = [[
     'rank',
     'name',
     'score',
+    'top20AdoptionCount',
     'top20AdoptionRate',
+    'top50AdoptionCount',
     'top50AdoptionRate',
+    'top100AdoptionCount',
     'top100AdoptionRate',
     'adoptedTop20AverageWinRate',
     'previousRank',
     'rankDelta',
+    'previousScore',
+    'scoreDelta',
+    'previousStatus',
   ]];
   payload.beastRanking.forEach(item => {
-    const previousRank = previousMap.get(item.id) || '';
     csvRows.push([
       item.rank,
       item.name,
       item.score.toFixed(6),
+      item.top20AdoptionCount,
       item.top20AdoptionRate.toFixed(6),
+      item.top50AdoptionCount,
       item.top50AdoptionRate.toFixed(6),
+      item.top100AdoptionCount,
       item.top100AdoptionRate.toFixed(6),
       item.adoptedTop20AverageWinRate.toFixed(6),
-      previousRank,
-      previousRank ? previousRank - item.rank : '',
+      item.previousRank ?? '',
+      item.rankDelta ?? '',
+      item.previousScore == null ? '' : item.previousScore.toFixed(6),
+      item.scoreDelta == null ? '' : item.scoreDelta.toFixed(6),
+      item.previousStatus,
     ]);
   });
   fs.writeFileSync(
@@ -718,16 +913,57 @@ function writeFinalOutputs(payload) {
     `- 再試行数: ${payload.counters.retries.toLocaleString()}`,
     `- 実行時間: ${(payload.elapsedMs / 60000).toFixed(2)}分`,
     '',
+    '## Stage集計',
+    '|Stage|候補数|試行数|予定戦闘数|開始|正常完了|エラー|再試行|実行時間|',
+    '|---|---:|---:|---:|---:|---:|---:|---:|---:|',
+    ...Object.entries(payload.stageSummary).map(([name, item]) =>
+      `|${name}|${item.candidates}|${item.trials}|${item.plannedBattles}|` +
+      `${item.startedBattles}|${item.completedBattles}|${item.errorBattles}|` +
+      `${item.retries}|${(item.elapsedMs / 60000).toFixed(2)}分|`
+    ),
+    '',
     '## 猛獣ランキング',
-    '|順位|猛獣|評価点|Top20|Top50|Top100|上位20採用編成の平均勝率|',
-    '|---:|---|---:|---:|---:|---:|---:|',
+    '|順位|猛獣|評価点|Top20|Top50|Top100|前回|順位差|スコア差|',
+    '|---:|---|---:|---:|---:|---:|---:|---:|---:|',
     ...payload.beastRanking.map(item =>
       `|${item.rank}|${item.name}|${(item.score * 100).toFixed(2)}|` +
-      `${(item.top20AdoptionRate * 100).toFixed(1)}%|` +
-      `${(item.top50AdoptionRate * 100).toFixed(1)}%|` +
-      `${(item.top100AdoptionRate * 100).toFixed(1)}%|` +
-      `${(item.adoptedTop20AverageWinRate * 100).toFixed(2)}%|`
+      `${item.top20AdoptionCount}/20 (${(item.top20AdoptionRate * 100).toFixed(1)}%)|` +
+      `${item.top50AdoptionCount}/50 (${(item.top50AdoptionRate * 100).toFixed(1)}%)|` +
+      `${item.top100AdoptionCount}/100 (${(item.top100AdoptionRate * 100).toFixed(1)}%)|` +
+      `${item.previousStatus === 'previously-unranked' ? '前回対象外' : item.previousRank}|` +
+      `${item.rankDelta ?? '-'}|` +
+      `${item.scoreDelta == null ? '-' : (item.scoreDelta * 100).toFixed(2)}|`
     ),
+    '',
+    '## 最終上位20編成',
+    '|順位|編成|勝率|平均生存数|平均残HP|',
+    '|---:|---|---:|---:|---:|',
+    ...payload.finalTop20.map((item, index) =>
+      `|${index + 1}|${item.names.join(' / ')}|${(item.winRate * 100).toFixed(2)}%|` +
+      `${item.avgAlive.toFixed(3)}|${item.avgHp.toFixed(2)}|`
+    ),
+    '',
+    `## 推奨6体\n${payload.recommendedSix.map(item => item.name).join(' / ')}`,
+    '',
+    `## 代替候補\n${payload.alternatives.map(item => item.name).join(' / ')}`,
+    '',
+    '## ペア相性（上位100編成）',
+    ...payload.pairSynergy.map(item =>
+      `- ${item.names.join(' / ')}: ${item.count}/100 (${(item.rate * 100).toFixed(1)}%)`
+    ),
+    '',
+    '## トリオ相性（上位100編成）',
+    ...payload.trioSynergy.map(item =>
+      `- ${item.names.join(' / ')}: ${item.count}/100 (${(item.rate * 100).toFixed(1)}%)`
+    ),
+    '',
+    '## 置換影響（上位20件）',
+    ...payload.replacementImpact.slice(0, 20).map(item =>
+      `- ${item.removeName} → ${item.addName}: ${(item.delta * 100).toFixed(2)}pt`
+    ),
+    '',
+    '## 出力ファイル',
+    ...payload.outputFiles.map(file => `- ${file}`),
   ];
   fs.writeFileSync(FINAL_REPORT_PATH, report.join('\n'));
 }
@@ -861,7 +1097,11 @@ function runFullSearch({ resume = false } = {}) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const checkpoint = resume ? loadCheckpoint() : null;
   const counters = checkpoint?.counters || createCounters();
-  const start = performance.now();
+  const runtime = {
+    sessionStartMs: performance.now(),
+    priorElapsedMs: checkpoint?.elapsedMs || 0,
+    initialCompletedBattles: counters.completedBattles,
+  };
 
   const stage1Generated = generateBalancedCombos(STAGES.stage1.candidates);
   const stage1 = evaluateOrResumeStage(
@@ -870,7 +1110,8 @@ function runFullSearch({ resume = false } = {}) {
     stage1Generated.combos,
     counters,
     checkpoint,
-    resume
+    resume,
+    runtime
   );
   const stage2Combos = generateNeighborCombos(
     stage1.results.slice(0, STAGES.stage3.candidates),
@@ -882,7 +1123,8 @@ function runFullSearch({ resume = false } = {}) {
     stage2Combos,
     counters,
     checkpoint,
-    resume
+    resume,
+    runtime
   );
   const stage3 = evaluateOrResumeStage(
     app,
@@ -890,7 +1132,8 @@ function runFullSearch({ resume = false } = {}) {
     stage2.results.slice(0, STAGES.stage3.candidates).map(result => result.ids),
     counters,
     checkpoint,
-    resume
+    resume,
+    runtime
   );
   const stage4 = evaluateOrResumeStage(
     app,
@@ -898,7 +1141,8 @@ function runFullSearch({ resume = false } = {}) {
     stage3.results.slice(0, STAGES.stage4.candidates).map(result => result.ids),
     counters,
     checkpoint,
-    resume
+    resume,
+    runtime
   );
   const finalStage = evaluateOrResumeStage(
     app,
@@ -906,7 +1150,8 @@ function runFullSearch({ resume = false } = {}) {
     stage4.results.slice(0, STAGES.final.candidates).map(result => result.ids),
     counters,
     checkpoint,
-    resume
+    resume,
+    runtime
   );
 
   const finalByKey = new Map(finalStage.results.map(result => [result.key, result]));
@@ -922,7 +1167,8 @@ function runFullSearch({ resume = false } = {}) {
     replacements.map(item => item.ids),
     counters,
     checkpoint,
-    resume
+    resume,
+    runtime
   );
   const replacementResults = replacementStage.results.map(result => {
     const source = replacements.find(item => comboKey(item.ids) === result.key);
@@ -938,10 +1184,18 @@ function runFullSearch({ resume = false } = {}) {
 
   const beastRanking = buildBeastRanking(app, finalTop20, stage4.results, stage3.results);
   const previousRanking = buildPreviousRanking(app);
-  const previousRankMap = new Map(previousRanking.map(item => [item.id, item.rank]));
+  const previousMap = new Map(previousRanking.map(item => [item.id, item]));
   beastRanking.forEach(item => {
-    item.previousRank = previousRankMap.get(item.id) || null;
+    const previous = previousMap.get(item.id);
+    item.previousRank = previous?.rank || null;
     item.rankDelta = item.previousRank ? item.previousRank - item.rank : null;
+    item.previousScore = previous?.score ?? null;
+    item.scoreDelta = previous ? item.score - previous.score : null;
+    item.previousStatus = previous
+      ? 'ranked'
+      : PREVIOUSLY_UNRANKED_IDS.includes(item.id)
+        ? 'previously-unranked'
+        : 'not-found';
   });
 
   if (counters.completedBattles !== PLANNED_BATTLES) {
@@ -950,9 +1204,28 @@ function runFullSearch({ resume = false } = {}) {
     );
   }
 
+  const elapsedMs = runtime.priorElapsedMs + performance.now() - runtime.sessionStartMs;
+  const summarizeStage = (stageName, result) => ({
+    candidates: result.results.length,
+    trials: STAGES[stageName].trials,
+    plannedBattles: result.plannedBattles ?? result.results.length * STAGES[stageName].trials,
+    startedBattles: result.startedBattles ?? result.results.length * STAGES[stageName].trials,
+    completedBattles: result.completedBattles ?? result.results.length * STAGES[stageName].trials,
+    errorBattles: result.errorBattles ?? 0,
+    retries: result.retries ?? 0,
+    elapsedMs: result.elapsedMs ?? 0,
+  });
+  const outputFiles = [
+    FINAL_JSON_PATH,
+    FINAL_CSV_PATH,
+    FINAL_REPORT_PATH,
+    SEED_INFO_PATH,
+    CHECKPOINT_PATH,
+    ...Object.keys(STAGES).map(stageName => stageResultPath(stageName)),
+  ].map(filePath => path.relative(ROOT, filePath).replace(/\\/g, '/'));
   const payload = {
     finishedAt: new Date().toISOString(),
-    elapsedMs: performance.now() - start,
+    elapsedMs,
     config: {
       targets: TARGET_IDS,
       excludedNames: EXCLUDED_NAMES,
@@ -963,25 +1236,28 @@ function runFullSearch({ resume = false } = {}) {
       opponentPools: OPPONENT_POOLS,
       stages: STAGES,
       baseSeed: BASE_SEED,
+      previouslyUnrankedIds: PREVIOUSLY_UNRANKED_IDS,
     },
     counters,
     stageSummary: {
-      stage1: { candidates: stage1.results.length, trials: STAGES.stage1.trials },
-      stage2: { candidates: stage2.results.length, trials: STAGES.stage2.trials },
-      stage3: { candidates: stage3.results.length, trials: STAGES.stage3.trials },
-      stage4: { candidates: stage4.results.length, trials: STAGES.stage4.trials },
-      final: { candidates: finalStage.results.length, trials: STAGES.final.trials },
-      replacement: {
-        candidates: replacementResults.length,
-        trials: STAGES.replacement.trials,
-      },
+      stage1: summarizeStage('stage1', stage1),
+      stage2: summarizeStage('stage2', stage2),
+      stage3: summarizeStage('stage3', stage3),
+      stage4: summarizeStage('stage4', stage4),
+      final: summarizeStage('final', finalStage),
+      replacement: summarizeStage('replacement', replacementStage),
     },
     beastRanking,
     previousRanking,
     finalTop20,
     finalTop10: finalStage.results,
-    replacementImpact: replacementResults.sort((a, b) => a.delta - b.delta),
+    recommendedSix: beastRanking.slice(0, 6),
+    alternatives: beastRanking.slice(6, 12),
+    pairSynergy: buildCombinationSynergy(app, stage3.results, 2),
+    trioSynergy: buildCombinationSynergy(app, stage3.results, 3),
+    replacementImpact: replacementResults.sort((a, b) => b.delta - a.delta),
     seedInfo: buildSeedInfo(),
+    outputFiles,
   };
 
   writeFinalOutputs(payload);
@@ -992,6 +1268,14 @@ function runFullSearch({ resume = false } = {}) {
     totalCandidates: 0,
     partialResults: [],
     counters,
+    elapsedMs,
+  });
+  progressRecord(runtime, counters, {
+    status: 'search-complete',
+    stage: 'complete',
+    completedCandidates: 0,
+    totalCandidates: 0,
+    stageCompletedBattles: 0,
   });
   return payload;
 }
@@ -1024,6 +1308,7 @@ module.exports = {
   EXCLUDED_IDS,
   DUPLICATE_IDS,
   TARGET_IDS,
+  PREVIOUSLY_UNRANKED_IDS,
   OPPONENT_POOLS,
   ORDER_PATTERNS,
   OPPONENT_ORDER_PATTERNS,
@@ -1038,6 +1323,7 @@ module.exports = {
   createCounters,
   runBattleWithCounters,
   buildBeastRanking,
+  buildCombinationSynergy,
   runDryRun,
   runFullSearch,
 };
