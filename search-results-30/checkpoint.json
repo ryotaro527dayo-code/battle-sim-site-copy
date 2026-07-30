@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "savedAt": "2026-07-30T15:00:46.053Z",
+  "status": "complete",
+  "stage": "complete",
+  "completedCandidates": 0,
+  "totalCandidates": 0,
+  "partialResults": [],
+  "counters": {
+    "plannedBattles": 1513200,
+    "startedBattles": 1513200,
+    "completedBattles": 1513200,
+    "errorBattles": 0,
+    "retries": 0
+  },
+  "elapsedMs": 5201450.0956
+}
