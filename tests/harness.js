@@ -57,6 +57,8 @@ function loadBattleSim() {
     `${inlineScript}
 return {
   CHARS,
+  SKILL_LV4_EFFECTS,
+  SKILL_LEVEL_VALUE_TABLE,
   Fighter,
   SpeedModifierType,
   ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE,
