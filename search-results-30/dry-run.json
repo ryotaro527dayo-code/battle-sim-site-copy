@@ -1,0 +1,491 @@
+{
+  "generatedAt": "2026-07-30T13:17:09.939Z",
+  "status": "dry-run-complete",
+  "fullSearchStarted": false,
+  "targetCount": 30,
+  "targets": [
+    {
+      "id": "kong",
+      "name": "怪力コング"
+    },
+    {
+      "id": "dark_rex",
+      "name": "暗黒レックス"
+    },
+    {
+      "id": "ice_ptera",
+      "name": "氷翼プテラ"
+    },
+    {
+      "id": "golden_rex",
+      "name": "黄金レックス"
+    },
+    {
+      "id": "tyrannorex",
+      "name": "暴王レックス"
+    },
+    {
+      "id": "white_saber",
+      "name": "ホワイトサーベル"
+    },
+    {
+      "id": "gigant",
+      "name": "ギガント王竜"
+    },
+    {
+      "id": "mineral_rex",
+      "name": "鉱石レックス"
+    },
+    {
+      "id": "haou_tiger",
+      "name": "覇王タイガー"
+    },
+    {
+      "id": "luminous_dragon",
+      "name": "ルミナス鏡竜"
+    },
+    {
+      "id": "ankylosaurus",
+      "name": "アンキロサウルス"
+    },
+    {
+      "id": "feather_serpent",
+      "name": "羽蛇竜"
+    },
+    {
+      "id": "quetzalcoatlus",
+      "name": "ケツァカトルス"
+    },
+    {
+      "id": "ice_mammoth",
+      "name": "氷封マンモス"
+    },
+    {
+      "id": "yutyrannus",
+      "name": "ユウティラヌス"
+    },
+    {
+      "id": "spinosaurus",
+      "name": "スピノサウルス"
+    },
+    {
+      "id": "shadow_unicorn",
+      "name": "闇影ユニコーン"
+    },
+    {
+      "id": "thunder_dragon",
+      "name": "雷竜"
+    },
+    {
+      "id": "triceratops",
+      "name": "トリケラトプス"
+    },
+    {
+      "id": "crimson_birddrake",
+      "name": "クリムゾン鳥竜"
+    },
+    {
+      "id": "wandering_dragon",
+      "name": "彷徨竜"
+    },
+    {
+      "id": "horned_rex",
+      "name": "横角レックス"
+    },
+    {
+      "id": "alphasaurus",
+      "name": "アルファサウルス"
+    },
+    {
+      "id": "black_panther",
+      "name": "黒豹"
+    },
+    {
+      "id": "zephyrax",
+      "name": "ゼフィラックス"
+    },
+    {
+      "id": "flame_tail_ptera",
+      "name": "焔尾プテラ"
+    },
+    {
+      "id": "azure_stego",
+      "name": "蒼剣ステゴ"
+    },
+    {
+      "id": "thunder_bull",
+      "name": "雷牛"
+    },
+    {
+      "id": "dacentrurus",
+      "name": "ダケントルルス"
+    },
+    {
+      "id": "silver_frost_rex",
+      "name": "銀霜レックス"
+    }
+  ],
+  "excludedNames": [
+    "黄棘レックス",
+    "ヤングレックス",
+    "ミニレックス",
+    "ヴェロキラプトル",
+    "インフェルノ炎竜"
+  ],
+  "excludedIds": [
+    "kibarra_rex_50",
+    "kibarra_rex",
+    "young_rex",
+    "mini_rex",
+    "velociraptor",
+    "inferno_dragon"
+  ],
+  "duplicateIds": [
+    "k_kong",
+    "k_kong_100",
+    "k_tyrex"
+  ],
+  "excludedInTargets": [],
+  "excludedInOpponents": [],
+  "duplicateOrLegacyIds": [],
+  "opponentPools": [
+    {
+      "name": "基準編成1",
+      "ids": [
+        "quetzalcoatlus",
+        "haou_tiger",
+        "thunder_dragon",
+        "horned_rex",
+        "golden_rex",
+        "triceratops"
+      ],
+      "names": [
+        "ケツァカトルス",
+        "覇王タイガー",
+        "雷竜",
+        "横角レックス",
+        "黄金レックス",
+        "トリケラトプス"
+      ]
+    },
+    {
+      "name": "基準編成2",
+      "ids": [
+        "shadow_unicorn",
+        "ice_mammoth",
+        "spinosaurus",
+        "wandering_dragon",
+        "tyrannorex",
+        "flame_tail_ptera"
+      ],
+      "names": [
+        "闇影ユニコーン",
+        "氷封マンモス",
+        "スピノサウルス",
+        "彷徨竜",
+        "暴王レックス",
+        "焔尾プテラ"
+      ]
+    },
+    {
+      "name": "基準編成3",
+      "ids": [
+        "yutyrannus",
+        "feather_serpent",
+        "luminous_dragon",
+        "dark_rex",
+        "gigant",
+        "dacentrurus"
+      ],
+      "names": [
+        "ユウティラヌス",
+        "羽蛇竜",
+        "ルミナス鏡竜",
+        "暗黒レックス",
+        "ギガント王竜",
+        "ダケントルルス"
+      ]
+    },
+    {
+      "name": "基準編成4",
+      "ids": [
+        "mineral_rex",
+        "zephyrax",
+        "ice_ptera",
+        "white_saber",
+        "ankylosaurus",
+        "thunder_bull"
+      ],
+      "names": [
+        "鉱石レックス",
+        "ゼフィラックス",
+        "氷翼プテラ",
+        "ホワイトサーベル",
+        "アンキロサウルス",
+        "雷牛"
+      ]
+    },
+    {
+      "name": "基準編成5",
+      "ids": [
+        "crimson_birddrake",
+        "kong",
+        "alphasaurus",
+        "black_panther",
+        "silver_frost_rex",
+        "azure_stego"
+      ],
+      "names": [
+        "クリムゾン鳥竜",
+        "怪力コング",
+        "アルファサウルス",
+        "黒豹",
+        "銀霜レックス",
+        "蒼剣ステゴ"
+      ]
+    }
+  ],
+  "opponentPoolSlotCount": 30,
+  "opponentPoolUniqueCount": 30,
+  "stage1": {
+    "candidates": 50000,
+    "attempts": 52264,
+    "totalAdoptions": 300000,
+    "expectedAverageAdoptions": 10000,
+    "minAdoptions": 9889,
+    "maxAdoptions": 10091,
+    "spread": 202,
+    "adoptionCounts": {
+      "怪力コング": 10089,
+      "暗黒レックス": 10031,
+      "氷翼プテラ": 10028,
+      "黄金レックス": 9958,
+      "暴王レックス": 10062,
+      "ホワイトサーベル": 10087,
+      "ギガント王竜": 9969,
+      "鉱石レックス": 10014,
+      "覇王タイガー": 10027,
+      "ルミナス鏡竜": 9953,
+      "アンキロサウルス": 10005,
+      "羽蛇竜": 9937,
+      "ケツァカトルス": 9957,
+      "氷封マンモス": 10091,
+      "ユウティラヌス": 9980,
+      "スピノサウルス": 10025,
+      "闇影ユニコーン": 9980,
+      "雷竜": 9964,
+      "トリケラトプス": 10001,
+      "クリムゾン鳥竜": 10009,
+      "彷徨竜": 9988,
+      "横角レックス": 9984,
+      "アルファサウルス": 10020,
+      "黒豹": 9983,
+      "ゼフィラックス": 9990,
+      "焔尾プテラ": 9889,
+      "蒼剣ステゴ": 9979,
+      "雷牛": 10007,
+      "ダケントルルス": 9998,
+      "銀霜レックス": 9995
+    },
+    "allTeamsHaveSixUniqueBeasts": true,
+    "uniqueCandidateCount": 50000
+  },
+  "stages": {
+    "stage1": {
+      "candidates": 50000,
+      "trials": 10,
+      "checkpointEvery": 500
+    },
+    "stage2": {
+      "candidates": 30000,
+      "trials": 20,
+      "checkpointEvery": 500
+    },
+    "stage3": {
+      "candidates": 800,
+      "trials": 200,
+      "checkpointEvery": 50
+    },
+    "stage4": {
+      "candidates": 80,
+      "trials": 2000,
+      "checkpointEvery": 5
+    },
+    "final": {
+      "candidates": 10,
+      "trials": 5000,
+      "checkpointEvery": 1
+    },
+    "replacement": {
+      "candidates": 144,
+      "trials": 300,
+      "checkpointEvery": 12
+    }
+  },
+  "plannedBattles": 1513200,
+  "countersAtDryRun": {
+    "plannedBattles": 1513200,
+    "startedBattles": 0,
+    "completedBattles": 0,
+    "errorBattles": 0,
+    "retries": 0
+  },
+  "fixedStats": {
+    "lv": 100,
+    "stars": 5,
+    "dur": 1000,
+    "atk": 500,
+    "agi": 500,
+    "will": 236
+  },
+  "skillLevel": 4,
+  "orderPatterns": {
+    "candidate": 12,
+    "opponent": 12
+  },
+  "scheduleSamples": {
+    "stage1": [
+      {
+        "stage": "stage1",
+        "trial": 0,
+        "opponentPoolIndex": 0,
+        "candidateOrderPatternIndex": 0,
+        "opponentOrderPatternIndex": 0,
+        "seed": 3403694462
+      },
+      {
+        "stage": "stage1",
+        "trial": 1,
+        "opponentPoolIndex": 1,
+        "candidateOrderPatternIndex": 1,
+        "opponentOrderPatternIndex": 0,
+        "seed": 2836008095
+      },
+      {
+        "stage": "stage1",
+        "trial": 2,
+        "opponentPoolIndex": 2,
+        "candidateOrderPatternIndex": 2,
+        "opponentOrderPatternIndex": 0,
+        "seed": 611990700
+      },
+      {
+        "stage": "stage1",
+        "trial": 3,
+        "opponentPoolIndex": 3,
+        "candidateOrderPatternIndex": 3,
+        "opponentOrderPatternIndex": 0,
+        "seed": 2322173613
+      },
+      {
+        "stage": "stage1",
+        "trial": 4,
+        "opponentPoolIndex": 4,
+        "candidateOrderPatternIndex": 4,
+        "opponentOrderPatternIndex": 0,
+        "seed": 3322557114
+      },
+      {
+        "stage": "stage1",
+        "trial": 5,
+        "opponentPoolIndex": 0,
+        "candidateOrderPatternIndex": 5,
+        "opponentOrderPatternIndex": 1,
+        "seed": 2193618395
+      },
+      {
+        "stage": "stage1",
+        "trial": 6,
+        "opponentPoolIndex": 1,
+        "candidateOrderPatternIndex": 6,
+        "opponentOrderPatternIndex": 1,
+        "seed": 3120966376
+      },
+      {
+        "stage": "stage1",
+        "trial": 7,
+        "opponentPoolIndex": 2,
+        "candidateOrderPatternIndex": 7,
+        "opponentOrderPatternIndex": 1,
+        "seed": 964026153
+      },
+      {
+        "stage": "stage1",
+        "trial": 8,
+        "opponentPoolIndex": 3,
+        "candidateOrderPatternIndex": 8,
+        "opponentOrderPatternIndex": 1,
+        "seed": 1425713670
+      },
+      {
+        "stage": "stage1",
+        "trial": 9,
+        "opponentPoolIndex": 4,
+        "candidateOrderPatternIndex": 9,
+        "opponentOrderPatternIndex": 1,
+        "seed": 2185954087
+      }
+    ],
+    "reproducibilityCheck": true,
+    "randomSequenceProbe": {
+      "seed": 3403694462,
+      "sequence": [
+        0.02648513694293797,
+        0.554146979469806,
+        0.9013894272502512,
+        0.271804187214002,
+        0.8904939049389213,
+        0.24741248018108308,
+        0.7972312329802662,
+        0.6198611727450043,
+        0.47576272091828287,
+        0.29384558787569404,
+        0.23111431836150587,
+        0.5679836852941662
+      ]
+    }
+  },
+  "scoreFormula": "top50AdoptionRate * 0.45 + top20AdoptionRate * 0.45 + top100AdoptionRate * 0.10",
+  "outputPaths": {
+    "dryRun": "C:\\Users\\ryota\\Documents\\Codex\\2026-07-25\\battle-sim\\search-results-30\\dry-run.json",
+    "checkpoint": "C:\\Users\\ryota\\Documents\\Codex\\2026-07-25\\battle-sim\\search-results-30\\checkpoint.json",
+    "finalJson": "C:\\Users\\ryota\\Documents\\Codex\\2026-07-25\\battle-sim\\search-results-30\\final-results.json",
+    "finalCsv": "C:\\Users\\ryota\\Documents\\Codex\\2026-07-25\\battle-sim\\search-results-30\\beast-ranking.csv",
+    "finalReport": "C:\\Users\\ryota\\Documents\\Codex\\2026-07-25\\battle-sim\\search-results-30\\final-report.md",
+    "seedInfo": "C:\\Users\\ryota\\Documents\\Codex\\2026-07-25\\battle-sim\\search-results-30\\seed-info.json",
+    "stageResults": "C:\\Users\\ryota\\Documents\\Codex\\2026-07-25\\battle-sim\\search-results-30\\stages"
+  },
+  "resumeCommand": "node ranking/beast-priority-search-30.js --run --resume",
+  "targetNames": [
+    "怪力コング",
+    "暗黒レックス",
+    "氷翼プテラ",
+    "黄金レックス",
+    "暴王レックス",
+    "ホワイトサーベル",
+    "ギガント王竜",
+    "鉱石レックス",
+    "覇王タイガー",
+    "ルミナス鏡竜",
+    "アンキロサウルス",
+    "羽蛇竜",
+    "ケツァカトルス",
+    "氷封マンモス",
+    "ユウティラヌス",
+    "スピノサウルス",
+    "闇影ユニコーン",
+    "雷竜",
+    "トリケラトプス",
+    "クリムゾン鳥竜",
+    "彷徨竜",
+    "横角レックス",
+    "アルファサウルス",
+    "黒豹",
+    "ゼフィラックス",
+    "焔尾プテラ",
+    "蒼剣ステゴ",
+    "雷牛",
+    "ダケントルルス",
+    "銀霜レックス"
+  ]
+}
