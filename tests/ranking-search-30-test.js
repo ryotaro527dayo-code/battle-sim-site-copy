@@ -89,11 +89,18 @@ const beastRanking = ranking.buildBeastRanking(
 assert.strictEqual(beastRanking.length, 30);
 assert(beastRanking.every((item, index) => item.rank === index + 1));
 assert(beastRanking.every(item =>
+  Number.isInteger(item.top20AdoptionCount) &&
+  Number.isInteger(item.top50AdoptionCount) &&
+  Number.isInteger(item.top100AdoptionCount)
+));
+assert(beastRanking.every(item =>
   item.score ===
     item.top50AdoptionRate * 0.45 +
     item.top20AdoptionRate * 0.45 +
     item.top100AdoptionRate * 0.10
 ));
+assert(ranking.buildCombinationSynergy(app, fakeResults, 2).length > 0);
+assert(ranking.buildCombinationSynergy(app, fakeResults, 3).length > 0);
 
 {
   const counters = ranking.createCounters();
@@ -125,6 +132,40 @@ assert(beastRanking.every(item =>
   assert.strictEqual(counters.completedBattles, 1);
   assert.strictEqual(counters.errorBattles, 1);
   assert.strictEqual(counters.retries, 1);
+}
+
+{
+  const counters = ranking.createCounters();
+  const fakeApp = {
+    withSeededRandom(seed, callback) {
+      assert.strictEqual(seed, 456);
+      return callback();
+    },
+    simulateBattle6v6() {
+      throw new Error('persistent test failure');
+    },
+  };
+  assert.throws(
+    () => ranking.runBattleWithCounters(
+      fakeApp,
+      () => ({ teamA: [], teamB: [] }),
+      456,
+      counters,
+      { stage: 'stage1', candidateKey: 'a|b|c', trial: 7 }
+    ),
+    error => {
+      assert.strictEqual(error.rankingContext.stage, 'stage1');
+      assert.strictEqual(error.rankingContext.candidateKey, 'a|b|c');
+      assert.strictEqual(error.rankingContext.trial, 7);
+      assert.strictEqual(error.rankingContext.seed, 456);
+      assert.strictEqual(error.rankingContext.error.message, 'persistent test failure');
+      return true;
+    }
+  );
+  assert.strictEqual(counters.startedBattles, 4);
+  assert.strictEqual(counters.completedBattles, 0);
+  assert.strictEqual(counters.errorBattles, 4);
+  assert.strictEqual(counters.retries, 3);
 }
 
 console.log('ranking search 30 ok');
