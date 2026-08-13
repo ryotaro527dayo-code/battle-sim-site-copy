@@ -5628,9 +5628,16 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       return debug;
     };
 
-    const tryDefenseDodge = (target) => {
+    const prepareDefenseDodge = (target) => {
       if (!target.defDodgeReady) {
-        mainDodgeInfo = { checked: false, reason: 'not_ready' };
+        mainDodgeInfo = {
+          checked: false,
+          reason: 'not_ready',
+          dodgeEligible: false,
+          dodgeRoll: null,
+          dodgeSuccess: false,
+          dodgeConsumed: false,
+        };
         return false;
       }
       const chance = target.defDodgeParam || 0;
@@ -5638,8 +5645,24 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       target.defDodgeParam = 0;
       const roll = rand('defense_dodge');
       if (developerLog && currentRandomLog?.length) currentRandomLog[currentRandomLog.length - 1].convertedValue = roll;
-      mainDodgeInfo = { checked: true, chance, roll, success: roll < chance };
-      if (roll < chance) {
+      mainDodgeInfo = {
+        checked: true,
+        type: 'defense_dodge',
+        chance,
+        roll,
+        success: roll < chance,
+        dodgeEligible: true,
+        dodgeRoll: roll,
+        dodgeSuccess: roll < chance,
+        dodgeConsumed: false,
+      };
+      return mainDodgeInfo.success;
+    };
+
+    const consumePreparedDefenseDodge = (target) => {
+      if (!mainDodgeInfo?.checked) return false;
+      mainDodgeInfo.dodgeConsumed = true;
+      if (mainDodgeInfo.success) {
         consumeAttackProgress();
         push('log-dodge', t('defDodgeSuccess', fighterName(target)));
         return true;
@@ -5648,19 +5671,43 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       return false;
     };
 
-    // スキル抑制: 交代直後 or 敵が回避持ち（firstDodge）の場合は通常攻撃を優先
-    const skipByDodge = def.firstDodge;
+    const tryDefenseDodge = (target) => {
+      prepareDefenseDodge(target);
+      return consumePreparedDefenseDodge(target);
+    };
+
+    const skipEntryFirstDefense =
+      pendingEntryDefenseSuppression?.survivor === def;
     const skipBySeal = atk.skillSealTurns > 0;
     const defenderSealActiveForDefense = def.skillSealTurns > 0;
+
+    // 防御スキル判定と回避抽選を攻撃種別の決定前に行う。
+    mainDefenseInfo = activateDefenseSkill(def, atk, {
+      skillSealActive: defenderSealActiveForDefense,
+      entryDamageSuppressed: skipEntryFirstDefense,
+      hitIndex: 1,
+    });
+    targetRageSteps.push({
+      label: skipEntryFirstDefense ? 'defense_suppressed_for_entry_first_damage' : 'defense_skill_consume_or_check',
+      value: rageState(def),
+      detail: mainDefenseInfo,
+    });
+    const defenseDodgeSuccess = prepareDefenseDodge(def);
+    const firstDodgeSuccess = !!def.firstDodge;
+    const forcedNormalByDodgeSuccess = firstDodgeSuccess || defenseDodgeSuccess;
+
     const attackSkillCandidate = atk.data.skills.find(s => s.type === 'attack') || null;
     const attackSkillCost = attackSkillCandidate ? getParam(atk.data, attackSkillCandidate.effect, 'rageCost', attackSkillCandidate.rageCost || 0) : null;
     const skipByEntryAttackSkill =
       pendingEntryAttackSkillSuppression?.fighter === atk;
-    const skipSkill = skipByEntryAttackSkill || skipByDodge || skipBySeal;
+    const attackRageBeforeDodge = atk.atkRage;
+    const attackSkillAvailableBeforeDodge =
+      !skipByEntryAttackSkill && !skipBySeal && !!atk.getActiveAttackSkill();
+    const skipSkill = skipByEntryAttackSkill || forcedNormalByDodgeSuccess || skipBySeal;
     let attackSkillAvailable = !skipSkill && !!atk.getActiveAttackSkill();
     let attackSkillSkipReason = null;
     if (skipBySeal) attackSkillSkipReason = 'skill_sealed';
-    else if (skipByDodge) attackSkillSkipReason = 'target_first_dodge_forces_normal';
+    else if (forcedNormalByDodgeSuccess) attackSkillSkipReason = 'dodge_success_forces_normal';
     else if (skipByEntryAttackSkill) attackSkillSkipReason = 'entry_suppression';
     else if (!attackSkillAvailable) attackSkillSkipReason = 'insufficient_attack_rage_or_no_attack_skill';
     const attackSkillCheck = {
@@ -5670,7 +5717,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         { condition: 'has_attack_skill', passed: !!attackSkillCandidate },
         { condition: 'attack_rage_at_least_cost', passed: attackSkillCandidate ? atk.atkRage >= attackSkillCost : false, actual: atk.atkRage, required: attackSkillCost },
         { condition: 'not_sealed', passed: !skipBySeal, actual: skipBySeal },
-        { condition: 'not_forced_normal_by_first_dodge', passed: !skipByDodge, actual: skipByDodge },
+        { condition: 'not_forced_normal_by_dodge_success', passed: !forcedNormalByDodgeSuccess, actual: forcedNormalByDodgeSuccess },
         { condition: 'not_entry_suppressed', passed: !skipByEntryAttackSkill, actual: skipByEntryAttackSkill },
       ],
       result: attackSkillAvailable ? 'attack_skill' : 'normal_attack',
@@ -5750,20 +5797,6 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
 
     // スキル確認
     const atkSkill = skipSkill ? null : atk.getActiveAttackSkill();
-    const skipEntryFirstDefense =
-      pendingEntryDefenseSuppression?.survivor === def;
-
-    // === 防御スキル（反応型）: 攻撃を受ける側がレイジ消費して発動 ===
-    mainDefenseInfo = activateDefenseSkill(def, atk, {
-      skillSealActive: defenderSealActiveForDefense,
-      entryDamageSuppressed: skipEntryFirstDefense,
-      hitIndex: 1,
-    });
-    targetRageSteps.push({
-      label: skipEntryFirstDefense ? 'defense_suppressed_for_entry_first_damage' : 'defense_skill_consume_or_check',
-      value: rageState(def),
-      detail: mainDefenseInfo,
-    });
 
     if (atkSkill) {
       push('log-skill', t('skillUse', fighterName(atk), skillName(atkSkill)));
@@ -5790,11 +5823,21 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           },
         }),
       });
-    } else if (skipByDodge && atk.getActiveAttackSkill()) {
+    } else if (forcedNormalByDodgeSuccess && attackSkillAvailableBeforeDodge) {
       push('log-buff', t('dodgeNormal', fighterName(def), fighterName(atk)));
     } else if (skipBySeal && atk.getActiveAttackSkill()) {
       push('log-buff', t('skillSealed', fighterName(atk)));
     }
+    Object.assign(mainDodgeInfo, {
+      dodgeEligible: firstDodgeSuccess || mainDodgeInfo.dodgeEligible,
+      dodgeRoll: mainDodgeInfo.dodgeRoll,
+      dodgeSuccess: forcedNormalByDodgeSuccess,
+      attackSkillAvailableBeforeDodge,
+      forcedNormalByDodgeSuccess,
+      attackTypeAfterDodgeCheck: atkSkill ? 'skill' : 'normal',
+      attackRageBefore: attackRageBeforeDodge,
+      attackRageAfter: atk.atkRage,
+    });
 
     // ダメージ計算
     let toxicFrenzyRatio = null;
@@ -6009,7 +6052,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       mainDamageInfo.fullPowerCalculation = fullPowerCalculation;
       mainDamageDebug.fullPowerCalculation = fullPowerCalculation;
     }
-    if (tryDefenseDodge(def)) {
+    if (consumePreparedDefenseDodge(def)) {
       recordAnalysis({
         eventType: 'hit',
         attackType: atkSkill ? 'skill' : 'normal',
@@ -6032,6 +6075,17 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     // 初回回避チェック
     if (def.firstDodge) {
       def.firstDodge = false;
+      Object.assign(mainDodgeInfo, {
+        checked: true,
+        type: 'first_dodge',
+        success: true,
+        dodgeEligible: true,
+        dodgeRoll: null,
+        dodgeSuccess: true,
+        forcedNormalByDodgeSuccess: true,
+        attackTypeAfterDodgeCheck: 'normal',
+        dodgeConsumed: true,
+      });
       def.damageBonusTurns = 3;
       atk.attackCount++;
       if (atk.damageBonusTurns > 0) atk.damageBonusTurns = Math.max(0, atk.damageBonusTurns - 1);
@@ -6048,7 +6102,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         stateBefore: actionStateBefore,
         attackSkill: attackSkillInfo || { used: false, available: attackSkillAvailable, reason: attackSkillSkipReason, check: attackSkillCheck },
         defense: mainDefenseInfo,
-        dodge: { checked: true, type: 'first_dodge', success: true },
+        dodge: mainDodgeInfo,
         damage: Object.assign({}, mainDamageInfo, { displayed: 0, dodged: true }),
         rage: { actor: actorRageSteps, target: targetRageSteps },
         stateAfter: { actor: fighterState(atk), target: fighterState(def) },
@@ -6253,6 +6307,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     const dmgLabel = def.damageBonusTurns > 0 ? t('damageBonus', Math.round(def.damageBonusPercent*100)) : '';
     push('log-attack',
       t('attackLog', fighterName(atk), fighterName(def), skillLabel, dmg, dmgLabel, def.hp));
+    mainDodgeInfo.attackRageAfter = atk.atkRage;
     recordAnalysis({
       eventType: 'hit',
       attackType: atkSkill ? 'skill' : 'normal',
