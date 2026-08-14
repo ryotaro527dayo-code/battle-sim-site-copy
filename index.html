@@ -6345,7 +6345,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     if (atkSkill) {
       if (atkSkill.effect === 'combo') {
         // 連撃: メイン攻撃後に追加打
-        // 連撃2発目も防御スキルを判定し、硬化はこの追加打にも適用する
+        // 2発目では防御レイジスキルの判定・準備済み効果の適用を行わない
         const comboRatio = getParam(atk.data, 'combo', 'param', atkSkill.param || 0.60);
         const comboRandomStart = currentRandomLog ? currentRandomLog.length : 0;
         const comboVarianceRoll = rand('damage_variance_combo');
@@ -6407,28 +6407,9 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         };
         comboTargetRageSteps.push({ label: 'defense_skill_consume_or_check', value: rageState(comboTarget), detail: comboDefenseInfo });
 
-        // キャリーオーバー時も回避・不屈の魂は通常通り適用
+        // キャリーオーバー先の参戦時回避は、防御レイジスキルとは別に適用する
         mainDodgeInfo = null;
-        if (tryDefenseDodge(comboTarget)) {
-          recordAnalysis({
-            eventType: 'hit',
-            attackType: 'skill',
-            skillId: 'combo',
-            skillName: skillName(atkSkill),
-            hitIndex: 2,
-            hitType: comboCarryOver ? 'combo_carryover' : 'combo',
-            carryover: comboCarryOver,
-            actor: fighterRef(atk),
-            target: fighterRef(comboTarget),
-            stateBefore: comboStateBefore,
-            defense: comboDefenseInfo,
-            dodge: mainDodgeInfo,
-            damage: { type: 'combo', ratio: comboRatio, secondHitMultiplier: COMBO_SECOND_HIT_DAMAGE_MULTIPLIER, displayed: 0, dodged: true },
-            rage: { actor: comboActorRageSteps, target: comboTargetRageSteps },
-            stateAfter: { actor: fighterState(atk), target: fighterState(comboTarget) },
-          });
-          // 回避成功時は2撃目のダメージ処理に進まない
-        } else if (comboCarryOver && comboTarget.firstDodge) {
+        if (comboCarryOver && comboTarget.firstDodge) {
           comboTarget.firstDodge = false;
           comboTarget.damageBonusTurns = 3;
           push('log-dodge', t('comboDodge', carryoverTargetName(comboTarget), Math.round(comboTarget.damageBonusPercent*100)));
@@ -6463,19 +6444,6 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           if (comboTarget.tormentBonus) comboDamageBonusBreakdown.push({ source: 'tormentBonus', operation: 'add', value: comboTarget.tormentBonus, before: comboMult, after: comboMult + comboTarget.tormentBonus });
           comboMult += comboTarget.tormentBonus;
           const comboDamageBonusMultiplierForLog = comboMult;
-          if (comboTarget.hardenReady) {
-            comboDefenseMultiplierBreakdown.push({ source: '防御-硬化皮膚', operation: 'subtract', value: comboTarget.hardenParam || 0.20, before: comboMult, after: Math.max(0, comboMult - (comboTarget.hardenParam || 0.20)) });
-            comboMult = Math.max(0, comboMult - (comboTarget.hardenParam || 0.20));
-            comboTarget.hardenReady = false;
-            comboTarget.hardenSource = null;
-            push('log-buff', t('hardenTriggered', fighterName(comboTarget)));
-          }
-          if (comboTarget.toxicSkinReady) {
-            comboDefenseMultiplierBreakdown.push({ source: '防御-毒性皮膚', operation: 'subtract', value: comboTarget.toxicSkinParam || 0.20, before: comboMult, after: Math.max(0, comboMult - (comboTarget.toxicSkinParam || 0.20)) });
-            comboMult = Math.max(0, comboMult - (comboTarget.toxicSkinParam || 0.20));
-            comboTarget.toxicSkinReady = false;
-            push('log-buff', t('toxicSkinTriggered', fighterName(comboTarget)));
-          }
           const comboBaseATK = atk.getATK() + (atk.hunterMarkBonus || 0);
           const comboRandoms = developerLog && currentRandomLog ? currentRandomLog.slice(comboRandomStart) : undefined;
           const comboAppliedRatio = comboRatio * COMBO_SECOND_HIT_DAMAGE_MULTIPLIER;
