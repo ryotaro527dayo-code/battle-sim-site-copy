@@ -25,13 +25,18 @@ const app = loadBattleSim();
     { name: '防御-反撃', type: 'defense', rageCost: 0, effect: 'counter', param: 0.25 },
   ]);
 
-  const result = app.simulateBattle6v6([comboUser], [counterTarget], true);
+  const result = app.simulateBattle6v6([comboUser], [counterTarget], true, { analysisMode: 'detail' });
   const logText = result.log.map(row => row.msg).join('\n');
   const counterUses = (logText.match(/が【防御-反撃】を発動/g) || []).length;
   const counterHits = (logText.match(/の反撃！/g) || []).length;
+  const secondHit = result.analysisEvents.find(event => event.eventType === 'hit' && event.skillId === 'combo' && event.hitIndex === 2);
 
   assert.strictEqual(counterUses, 1, 'combo should check defense rage skill only on the first hit');
   assert.strictEqual(counterHits, 1, 'combo second hit must not trigger a second counter');
+  assert(secondHit, 'combo second hit must be recorded as a separate event');
+  assert.strictEqual(secondHit.defense.triggered, false, 'combo second hit must not trigger a defense rage skill');
+  assert.strictEqual(secondHit.defense.reason, 'multi_hit_defense_check_skipped', 'combo second hit must record the skipped defense check reason');
+  assert.strictEqual(secondHit.defense.rageBefore, secondHit.defense.rageAfter, 'combo second hit must not consume defense rage');
 }
 
 {
