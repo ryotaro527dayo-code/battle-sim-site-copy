@@ -4283,6 +4283,8 @@ function applyOcrBatchImport() {
 // ===== バトルステート =====
 const ENABLE_QUAKE_HARDEN_LINK_BUG = false;
 const COMBO_SECOND_HIT_DAMAGE_MULTIPLIER = 1.05;
+// 暫定実機仕様: 連撃2発目の防御スキル可否は、各戦闘でペアごとに初回だけ抽選する。
+const COMBO_SECOND_HIT_DEFENSE_ACTIVATION_CHANCE = 0.80;
 const FULL_POWER_HIDDEN_DAMAGE_MULTIPLIER = 0.9;
 // 実機確認済み: 封印中は攻撃スキルとすべての防御スキルを発動しない。
 const SKILL_SEAL_BLOCKS_DEFENSE_SKILLS = true;
@@ -4602,6 +4604,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
   let currentActionMeta = null;
   let currentRandomLog = null;
   let slowEffectSequence = 0;
+  const comboSecondHitDefenseEligibility = new Map();
 
   const fighterSide = (fighter) => teamA.includes(fighter) ? 'A' : teamB.includes(fighter) ? 'B' : '?';
   const fighterIndex = (fighter) => fighterSide(fighter) === 'A' ? teamA.indexOf(fighter) : teamB.indexOf(fighter);
@@ -6345,7 +6348,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     if (atkSkill) {
       if (atkSkill.effect === 'combo') {
         // 連撃: メイン攻撃後に追加打
-        // 2発目では防御レイジスキルの判定・準備済み効果の適用を行わない
+        // 2発目の防御レイジスキルは、対象ペアごとの初回抽選結果に従う
         const comboRatio = getParam(atk.data, 'combo', 'param', atkSkill.param || 0.60);
         const comboRandomStart = currentRandomLog ? currentRandomLog.length : 0;
         const comboVarianceRoll = rand('damage_variance_combo');
@@ -6363,47 +6366,102 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           comboTarget.entryEffectsAppliedByCarryover = true;
         }
 
-        // 連撃2発目以降は防御レイジスキルの発動判定を行わない
+        // 同じ戦闘内では、攻撃者・防御者ペアの初回抽選結果を以後も使用する。
+        // simulateBattle6v6ごとにMapを作るため、1000回シミュレーションでは毎戦抽選される。
         const comboStateBefore = { actor: fighterState(atk), target: fighterState(comboTarget) };
         const comboTargetRageSteps = [{ label: 'start', value: rageState(comboTarget) }];
         const comboActorRageSteps = [{ label: 'start', value: rageState(atk) }];
-        const comboDefenseInfo = comboTarget.hp > 0 ? {
-          triggered: false,
-          reason: 'multi_hit_defense_check_skipped',
-          hitIndex: 2,
-          sealed: comboTarget.skillSealTurns > 0,
-          rageBefore: comboTarget.defRage,
-          rageAfter: comboTarget.defRage,
-          check: {
-            skillId: comboTarget.data.skills.find(s => s.type === 'defense')?.effect || null,
-            skillName: (() => { const s = comboTarget.data.skills.find(x => x.type === 'defense'); return s ? skillName(s) : null; })(),
+        const comboDefenseSkill = comboTarget.data.skills.find(s => s.type === 'defense') || null;
+        const comboDefenseRequiredRage = comboDefenseSkill
+          ? getParam(comboTarget.data, comboDefenseSkill.effect, 'rageCost', comboDefenseSkill.rageCost || 0)
+          : null;
+        const comboDefenseSupported = !!comboDefenseSkill && ['counter', 'harden', 'purify'].includes(comboDefenseSkill.effect);
+        const comboDefensePairKey = `${atk.instanceId}:${comboTarget.instanceId}`;
+        const comboDefenseCanRoll = !comboCarryOver && comboTarget.hp > 0 && comboDefenseSupported &&
+          comboTarget.skillSealTurns <= 0 && comboTarget.defRage >= comboDefenseRequiredRage;
+        let comboDefenseEligibility = comboSecondHitDefenseEligibility.get(comboDefensePairKey) || null;
+        let comboDefenseEligibilityRoll = null;
+        let comboDefenseEligibilityReused = false;
+        if (comboDefenseCanRoll) {
+          if (!comboDefenseEligibility) {
+            comboDefenseEligibilityRoll = rand('combo_second_hit_defense_eligibility');
+            comboDefenseEligibility = {
+              allowed: comboDefenseEligibilityRoll < COMBO_SECOND_HIT_DEFENSE_ACTIVATION_CHANCE,
+              roll: comboDefenseEligibilityRoll,
+            };
+            comboSecondHitDefenseEligibility.set(comboDefensePairKey, comboDefenseEligibility);
+          } else {
+            comboDefenseEligibilityRoll = comboDefenseEligibility.roll;
+            comboDefenseEligibilityReused = true;
+          }
+        }
+
+        let comboDefenseInfo;
+        if (comboDefenseCanRoll && comboDefenseEligibility?.allowed) {
+          comboDefenseInfo = activateDefenseSkill(comboTarget, atk, {
+            skillSealActive: false,
+            entryDamageSuppressed: false,
+            hitIndex: 2,
+          });
+          comboDefenseInfo.reason = 'combo_second_hit_pair_roll_passed';
+          comboDefenseInfo.check = {
+            skillId: comboDefenseSkill.effect,
+            skillName: skillName(comboDefenseSkill),
             checks: [
-              { condition: 'has_defense_skill', passed: comboTarget.data.skills.some(s => s.type === 'defense') },
-              { condition: 'defense_rage_at_least_cost', passed: false, actual: comboTarget.defRage, required: null },
-              { condition: 'not_sealed', passed: comboTarget.skillSealTurns <= 0, actual: comboTarget.skillSealTurns > 0 },
-              { condition: 'not_multi_hit_skipped', passed: false, actual: 'multi_hit_defense_check_skipped' },
-              { condition: 'not_entry_first_damage_suppressed', passed: true, actual: null },
+              { condition: 'target_alive', passed: true, actual: comboTarget.hp },
+              { condition: 'has_defense_skill', passed: true },
+              { condition: 'combo_second_hit_supported_skill', passed: true, actual: comboDefenseSkill.effect },
+              { condition: 'defense_rage_at_least_cost', passed: true, actual: comboDefenseInfo.rageBefore, required: comboDefenseRequiredRage },
+              { condition: 'not_sealed', passed: true, actual: false },
+              { condition: 'not_carryover', passed: true, actual: false },
+              { condition: 'combo_second_hit_pair_roll', passed: true, actual: comboDefenseEligibilityRoll, required: COMBO_SECOND_HIT_DEFENSE_ACTIVATION_CHANCE },
             ],
-            result: 'not_triggered',
-            reason: 'multi_hit_defense_check_skipped',
-          },
-        } : {
-          triggered: false,
-          reason: 'target_not_alive',
-          hitIndex: 2,
-          sealed: comboTarget.skillSealTurns > 0,
-          rageBefore: comboTarget.defRage,
-          rageAfter: comboTarget.defRage,
-          check: {
-            skillId: null,
-            skillName: null,
-            checks: [
-              { condition: 'target_alive', passed: false, actual: comboTarget.hp },
-              { condition: 'not_multi_hit_skipped', passed: false, actual: 'target_not_alive' },
-            ],
-            result: 'not_triggered',
-            reason: 'target_not_alive',
-          },
+            result: 'defense_skill',
+            reason: 'combo_second_hit_pair_roll_passed',
+          };
+        } else {
+          let comboDefenseReason = 'insufficient_defense_rage';
+          if (comboCarryOver) comboDefenseReason = 'combo_carryover_defense_check_skipped';
+          else if (comboTarget.hp <= 0) comboDefenseReason = 'target_not_alive';
+          else if (!comboDefenseSkill) comboDefenseReason = 'no_defense_skill';
+          else if (!comboDefenseSupported) comboDefenseReason = 'combo_second_hit_skill_not_supported';
+          else if (comboTarget.skillSealTurns > 0) comboDefenseReason = 'sealed';
+          else if (comboDefenseEligibility && !comboDefenseEligibility.allowed) comboDefenseReason = 'combo_second_hit_pair_roll_failed';
+          comboDefenseInfo = {
+            triggered: false,
+            reason: comboDefenseReason,
+            hitIndex: 2,
+            sealed: comboTarget.skillSealTurns > 0,
+            rageBefore: comboTarget.defRage,
+            requiredRage: comboDefenseRequiredRage,
+            rageAfter: comboTarget.defRage,
+            skillId: comboDefenseSkill?.effect || null,
+            skillName: comboDefenseSkill ? skillName(comboDefenseSkill) : null,
+            check: {
+              skillId: comboDefenseSkill?.effect || null,
+              skillName: comboDefenseSkill ? skillName(comboDefenseSkill) : null,
+              checks: [
+                { condition: 'target_alive', passed: comboTarget.hp > 0, actual: comboTarget.hp },
+                { condition: 'has_defense_skill', passed: !!comboDefenseSkill },
+                { condition: 'combo_second_hit_supported_skill', passed: comboDefenseSupported, actual: comboDefenseSkill?.effect || null },
+                { condition: 'defense_rage_at_least_cost', passed: comboDefenseSkill ? comboTarget.defRage >= comboDefenseRequiredRage : false, actual: comboTarget.defRage, required: comboDefenseRequiredRage },
+                { condition: 'not_sealed', passed: comboTarget.skillSealTurns <= 0, actual: comboTarget.skillSealTurns > 0 },
+                { condition: 'not_carryover', passed: !comboCarryOver, actual: comboCarryOver },
+                { condition: 'combo_second_hit_pair_roll', passed: comboDefenseEligibility?.allowed === true, actual: comboDefenseEligibilityRoll, required: COMBO_SECOND_HIT_DEFENSE_ACTIVATION_CHANCE },
+              ],
+              result: 'not_triggered',
+              reason: comboDefenseReason,
+            },
+          };
+        }
+        comboDefenseInfo.comboSecondHitEligibility = {
+          chance: COMBO_SECOND_HIT_DEFENSE_ACTIVATION_CHANCE,
+          roll: comboDefenseEligibilityRoll,
+          allowed: comboDefenseEligibility?.allowed ?? null,
+          reused: comboDefenseEligibilityReused,
+          attackerInstanceId: atk.instanceId,
+          defenderInstanceId: comboTarget.instanceId,
+          perBattle: true,
         };
         comboTargetRageSteps.push({ label: 'defense_skill_consume_or_check', value: rageState(comboTarget), detail: comboDefenseInfo });
 
@@ -6444,6 +6502,13 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           if (comboTarget.tormentBonus) comboDamageBonusBreakdown.push({ source: 'tormentBonus', operation: 'add', value: comboTarget.tormentBonus, before: comboMult, after: comboMult + comboTarget.tormentBonus });
           comboMult += comboTarget.tormentBonus;
           const comboDamageBonusMultiplierForLog = comboMult;
+          if (comboDefenseInfo.triggered && comboDefenseInfo.skillId === 'harden' && comboTarget.hardenReady) {
+            comboDefenseMultiplierBreakdown.push({ source: '防御-硬化皮膚', operation: 'subtract', value: comboTarget.hardenParam || 0.20, before: comboMult, after: Math.max(0, comboMult - (comboTarget.hardenParam || 0.20)) });
+            comboMult = Math.max(0, comboMult - (comboTarget.hardenParam || 0.20));
+            comboTarget.hardenReady = false;
+            comboTarget.hardenSource = null;
+            push('log-buff', t('hardenTriggered', fighterName(comboTarget)));
+          }
           const comboBaseATK = atk.getATK() + (atk.hunterMarkBonus || 0);
           const comboRandoms = developerLog && currentRandomLog ? currentRandomLog.slice(comboRandomStart) : undefined;
           const comboAppliedRatio = comboRatio * COMBO_SECOND_HIT_DAMAGE_MULTIPLIER;
