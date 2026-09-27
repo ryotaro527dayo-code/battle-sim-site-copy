@@ -1781,6 +1781,7 @@ const ENTITY_I18N = {
   yutyrannus: { ja: 'ユウティラヌス', en: 'Yutyrannus', ru: 'Ютираннус', zh: '羽王龙' },
   spinosaurus: { ja: 'スピノサウルス', en: 'Spinosaurus', ru: 'Спинозавр', zh: '棘龙' },
   shadow_unicorn: { ja: '闇影ユニコーン', en: 'Shadow Unicorn', ru: 'Теневой единорог', zh: '暗影独角兽' },
+  holy_light_unicorn: { ja: '聖光ユニコーン', en: 'Holy Light Unicorn', ru: 'Светлый единорог', zh: '圣光独角兽' },
   thunder_dragon: { ja: '雷竜', en: 'Thunder Dragon', ru: 'Громовой дракон', zh: '雷龙' },
   triceratops: { ja: 'トリケラトプス', en: 'Triceratops', ru: 'Трицератопс', zh: '三角龙' },
   inferno_dragon: { ja: 'インフェルノ炎竜', en: 'Inferno Flame Dragon', ru: 'Инферно-дракон', zh: '炼狱炎龙' },
@@ -2530,6 +2531,15 @@ const CHARS = {
       { name: '戦吼-急速', type: 'battlecry', effect: 'rapid', param: 0.12, param2: 0.08, desc: '速度+12%・攻撃力-8%' }
     ]
   },
+  holy_light_unicorn: {
+    id: 'holy_light_unicorn', name: '聖光ユニコーン', lv: 100, stars: 5, team: 'enemy',
+    dur: 834, atk: 416, agi: 420, will: 235,
+    skills: [
+      { name: '攻撃-全力一撃', type: 'attack', rageCost: 60, effect: 'full_power', param: 2.30, desc: '攻撃力230%相当のダメージ' },
+      { name: '防御-反撃', type: 'defense', rageCost: 40, effect: 'counter', param: 0.25, desc: '次に攻撃を受けた時に攻撃力25%で反撃' },
+      { name: '戦吼-重傷', type: 'battlecry', effect: 'heavy_wound', param: 0.10, desc: '最初の攻撃を回避後、3ターン被ダメージ+10%' }
+    ]
+  },
   thunder_dragon: {
     id: 'thunder_dragon', name: '雷竜', lv: 100, stars: 5, team: 'enemy',
     dur: 837, atk: 418, agi: 414, will: 230,
@@ -2671,7 +2681,7 @@ const OCR_CHAR_IDS = [
   'kong','dark_rex','young_rex',
   'kibarra_rex_50','kibarra_rex','mini_rex','velociraptor','white_saber','tyrannorex','mineral_rex','golden_rex','ice_ptera',
   'k_kong','k_kong_100','k_tyrex','gigant','haou_tiger','luminous_dragon','ankylosaurus','feather_serpent','quetzalcoatlus',
-  'ice_mammoth','yutyrannus','spinosaurus','shadow_unicorn','thunder_dragon',
+  'ice_mammoth','yutyrannus','spinosaurus','shadow_unicorn','holy_light_unicorn','thunder_dragon',
   'triceratops','inferno_dragon',
   'crimson_birddrake','wandering_dragon','horned_rex','alphasaurus','black_panther','zephyrax','flame_tail_ptera','azure_stego','thunder_bull','dacentrurus','silver_frost_rex'
 ];
@@ -2843,6 +2853,11 @@ const SKILL_LV4_EFFECTS = {
     combo: { rageCost: 50, param: 0.80 },
     def_dodge: { rageCost: 45, param: 0.60 },
     rapid: { param: 0.12, param2: 0.08 },
+  },
+  holy_light_unicorn: {
+    full_power: { rageCost: 60, param: 2.30 },
+    counter: { rageCost: 40, param: 0.25 },
+    heavy_wound: { param: 0.10 },
   },
   thunder_dragon: {
     quake: { rageCost: 50, param: 1.50, param2: 0.20 },
@@ -7425,7 +7440,7 @@ function buildCharOptions() {
     'kong','dark_rex','young_rex',
     'kibarra_rex_50','kibarra_rex','mini_rex','velociraptor','white_saber','tyrannorex','mineral_rex','golden_rex','ice_ptera',
     'k_kong','k_kong_100','k_tyrex','gigant','haou_tiger','luminous_dragon','ankylosaurus','feather_serpent','quetzalcoatlus',
-    'ice_mammoth','yutyrannus','spinosaurus','shadow_unicorn','thunder_dragon',
+    'ice_mammoth','yutyrannus','spinosaurus','shadow_unicorn','holy_light_unicorn','thunder_dragon',
     'triceratops','inferno_dragon',
     'crimson_birddrake','wandering_dragon','horned_rex','alphasaurus','black_panther','zephyrax','flame_tail_ptera','azure_stego','thunder_bull','dacentrurus','silver_frost_rex'
   ];
