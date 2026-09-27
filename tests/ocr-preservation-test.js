@@ -53,4 +53,29 @@ assert.strictEqual(app.SLOT_STAT.A[0].will, 114);
 assert.strictEqual(app.SLOT_STAT.A[0].dur, undefined);
 assert.strictEqual(app.SLOT_STAT.A[0].agi, undefined);
 
+{
+  const unicorn = app.CHARS.holy_light_unicorn;
+  assert(unicorn, 'Holy Light Unicorn must be registered');
+  assert.deepStrictEqual(
+    { lv: unicorn.lv, stars: unicorn.stars, dur: unicorn.dur, atk: unicorn.atk, agi: unicorn.agi, will: unicorn.will },
+    { lv: 100, stars: 5, dur: 834, atk: 416, agi: 420, will: 235 }
+  );
+  assert.deepStrictEqual(
+    unicorn.skills.map(skill => skill.effect),
+    ['full_power', 'counter', 'heavy_wound']
+  );
+  assert.deepStrictEqual(app.SKILL_LV4_EFFECTS.holy_light_unicorn, {
+    full_power: { rageCost: 60, param: 2.30 },
+    counter: { rageCost: 40, param: 0.25 },
+    heavy_wound: { param: 0.10 },
+  });
+  assert(app.getUniqueOcrCharIds().includes('holy_light_unicorn'), 'Holy Light Unicorn must appear in OCR choices');
+
+  const opponent = app.CHARS.gigant;
+  const result = app.withSeededRandom(3943, () =>
+    app.simulateBattle6v6([unicorn], [opponent], false)
+  );
+  assert(result && ['A', 'B'].includes(result.winningTeam), 'Holy Light Unicorn must be usable in battle');
+}
+
 console.log('ocr preservation ok');
