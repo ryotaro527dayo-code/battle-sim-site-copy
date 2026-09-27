@@ -18,25 +18,43 @@ const app = loadBattleSim();
 }
 
 {
-  const comboUser = beast('test_combo_single_defense', 'Combo Single Defense', { agi: 200, atk: 100, dur: 1000, will: 67 }, [
-    { name: '攻撃-連撃', type: 'attack', rageCost: 0, effect: 'combo', param: 0.80 },
-  ]);
-  const counterTarget = beast('test_combo_counter_target', 'Combo Counter Target', { agi: 100, atk: 100, dur: 40, will: 66 }, [
-    { name: '防御-反撃', type: 'defense', rageCost: 0, effect: 'counter', param: 0.25 },
-  ]);
+  const runComboDefenseCase = (roll, stats = {}) => {
+    const comboUser = beast('test_combo_pair_roll_user', 'Combo Pair Roll User', { agi: 200, atk: stats.attackerAtk || 25, dur: 2000, will: 67 }, [
+      { name: '攻撃-連撃', type: 'attack', rageCost: 0, effect: 'combo', param: 0.80 },
+    ]);
+    const counterTarget = beast('test_combo_pair_roll_target', 'Combo Pair Roll Target', { agi: 100, atk: 1, dur: stats.targetDur || 2000, will: 66 }, [
+      { name: '防御-反撃', type: 'defense', rageCost: 0, effect: 'counter', param: 0.25 },
+    ]);
+    const originalRandom = Math.random;
+    Math.random = () => roll;
+    try {
+      return app.simulateBattle6v6([comboUser], [counterTarget], true, { analysisMode: 'detail' });
+    } finally {
+      Math.random = originalRandom;
+    }
+  };
 
-  const result = app.simulateBattle6v6([comboUser], [counterTarget], true, { analysisMode: 'detail' });
-  const logText = result.log.map(row => row.msg).join('\n');
-  const counterUses = (logText.match(/が【防御-反撃】を発動/g) || []).length;
-  const counterHits = (logText.match(/の反撃！/g) || []).length;
-  const secondHit = result.analysisEvents.find(event => event.eventType === 'hit' && event.skillId === 'combo' && event.hitIndex === 2);
+  const passed = runComboDefenseCase(0.10);
+  const passedSecondHits = passed.analysisEvents.filter(event => event.eventType === 'hit' && event.skillId === 'combo' && event.hitIndex === 2 && !event.carryover);
+  assert(passedSecondHits.length >= 2, 'successful pair roll case must contain repeated combo second hits');
+  assert(passedSecondHits.every(event => event.defense.triggered), 'a passed pair roll must remain enabled for the same pair');
+  assert.strictEqual(passedSecondHits[0].defense.comboSecondHitEligibility.reused, false, 'the first second hit must roll');
+  assert(passedSecondHits.slice(1).every(event => event.defense.comboSecondHitEligibility.reused), 'later second hits must reuse the pair result');
 
-  assert.strictEqual(counterUses, 1, 'combo should check defense rage skill only on the first hit');
-  assert.strictEqual(counterHits, 1, 'combo second hit must not trigger a second counter');
-  assert(secondHit, 'combo second hit must be recorded as a separate event');
-  assert.strictEqual(secondHit.defense.triggered, false, 'combo second hit must not trigger a defense rage skill');
-  assert.strictEqual(secondHit.defense.reason, 'multi_hit_defense_check_skipped', 'combo second hit must record the skipped defense check reason');
-  assert.strictEqual(secondHit.defense.rageBefore, secondHit.defense.rageAfter, 'combo second hit must not consume defense rage');
+  const failed = runComboDefenseCase(0.90);
+  const failedSecondHits = failed.analysisEvents.filter(event => event.eventType === 'hit' && event.skillId === 'combo' && event.hitIndex === 2 && !event.carryover);
+  assert(failedSecondHits.length >= 2, 'failed pair roll case must contain repeated combo second hits');
+  assert(failedSecondHits.every(event => !event.defense.triggered), 'a failed pair roll must remain disabled for the same pair');
+  assert(failedSecondHits.every(event => event.defense.reason === 'combo_second_hit_pair_roll_failed'), 'failed pair roll reason must be recorded');
+
+  for (let battle = 0; battle < 1000; battle++) {
+    const roll = battle % 2 === 0 ? 0.10 : 0.90;
+    const result = runComboDefenseCase(roll, { attackerAtk: 60, targetDur: 100 });
+    const firstSecondHit = result.analysisEvents.find(event => event.eventType === 'hit' && event.skillId === 'combo' && event.hitIndex === 2 && !event.carryover);
+    assert(firstSecondHit, `battle ${battle + 1} must contain a combo second hit`);
+    assert.strictEqual(firstSecondHit.defense.triggered, roll < 0.80, `battle ${battle + 1} must perform a fresh first pair roll`);
+    assert.strictEqual(firstSecondHit.defense.comboSecondHitEligibility.reused, false, `battle ${battle + 1} first pair decision must not leak from another simulation`);
+  }
 }
 
 {
