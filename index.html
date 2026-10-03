@@ -1267,6 +1267,7 @@ const I18N = {
     damageBonus: (pct) => ` (被ダメ+${pct}%)`,
     comboDodge: (name, pct) => `💨 ${name}が連撃を回避！その後${pct}%被ダメUP(3ターン)`,
     carryOver: (name) => `（→${name}へキャリーオーバー）`,
+    carryOverCancelledByBattlecry: (attacker, entrant) => `   └ ${entrant}の参戦時戦吼で${attacker}が倒れたため、キャリーオーバー攻撃は中止`,
     comboHit: (dmg, carry, name, hp) => `   └ 連撃！${dmg}追加ダメージ${carry} [${name}残HP:${hp}]`,
     slowEffect: (name, down, agi) => `   └ ${name}の敏捷性-${down}！(${agi}) 2回攻撃まで継続`,
     breakthroughEffect: (name, atkDown, defDown) => `   └ ${name}の攻撃レイジ-${atkDown}・防御レイジ-${defDown}！`,
@@ -1426,6 +1427,7 @@ const I18N = {
     damageBonus: (pct) => ` (damage taken +${pct}%)`,
     comboDodge: (name, pct) => `💨 ${name} dodges the combo! Damage taken +${pct}% for 3 turns`,
     carryOver: (name) => `(→ carried over to ${name})`,
+    carryOverCancelledByBattlecry: (attacker, entrant) => `   └ ${entrant}'s entry battlecry defeated ${attacker}; carryover attack cancelled`,
     comboHit: (dmg, carry, name, hp) => `   └ Combo! ${dmg} extra damage ${carry} [${name} HP:${hp}]`,
     slowEffect: (name, down, agi) => `   └ ${name}'s agility -${down}! (${agi}) lasts for 2 attacks`,
     breakthroughEffect: (name, atkDown, defDown) => `   └ ${name}'s attack rage -${atkDown}, defense rage -${defDown}!`,
@@ -1585,6 +1587,7 @@ const I18N = {
     damageBonus: (pct) => ` (входящий урон +${pct}%)`,
     comboDodge: (name, pct) => `💨 ${name} уклоняется от комбо! Входящий урон +${pct}% на 3 хода`,
     carryOver: (name) => `(→ перенос на ${name})`,
+    carryOverCancelledByBattlecry: (attacker, entrant) => `   └ Боевой клич ${entrant} победил ${attacker}; перенос атаки отменен`,
     comboHit: (dmg, carry, name, hp) => `   └ Комбо! ${dmg} доп. урона ${carry} [HP ${name}: ${hp}]`,
     slowEffect: (name, down, agi) => `   └ Ловкость ${name} -${down}! (${agi}) длится 2 атаки`,
     breakthroughEffect: (name, atkDown, defDown) => `   └ Ярость атаки ${name} -${atkDown}, ярость защиты -${defDown}!`,
@@ -1744,6 +1747,7 @@ const I18N = {
     damageBonus: (pct) => ` (受到伤害+${pct}%)`,
     comboDodge: (name, pct) => `💨 ${name}闪避连击！之后3回合受到伤害+${pct}%`,
     carryOver: (name) => `（→转移到${name}）`,
+    carryOverCancelledByBattlecry: (attacker, entrant) => `   └ ${entrant}的入场战吼击败了${attacker}，取消转移攻击`,
     comboHit: (dmg, carry, name, hp) => `   └ 连击！${dmg}追加伤害${carry} [${name}剩余HP:${hp}]`,
     slowEffect: (name, down, agi) => `   └ ${name}敏捷-${down}！(${agi}) 持续2次攻击`,
     breakthroughEffect: (name, atkDown, defDown) => `   └ ${name}攻击怒气-${atkDown}・防御怒气-${defDown}！`,
@@ -6393,10 +6397,6 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         // 連撃: メイン攻撃後に追加打
         // 2発目の防御レイジスキルは、対象ペアごとの初回抽選結果に従う
         const comboRatio = getParam(atk.data, 'combo', 'param', atkSkill.param || 0.60);
-        const comboRandomStart = currentRandomLog ? currentRandomLog.length : 0;
-        const comboVarianceRoll = rand('damage_variance_combo');
-        const comboVariance = 0.95 + comboVarianceRoll * 0.10;
-        if (developerLog && currentRandomLog?.length) currentRandomLog[currentRandomLog.length - 1].convertedValue = comboVariance;
 
         let comboTarget = def;
         let comboCarryOver = false;
@@ -6407,7 +6407,31 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           armEntrySuppressions(comboTarget, atk);
           applyEntryBattleCries(atk, comboTarget);
           comboTarget.entryEffectsAppliedByCarryover = true;
+          if (atk.hp <= 0) {
+            push('log-debuff', t('carryOverCancelledByBattlecry', fighterName(atk), fighterName(comboTarget)));
+            recordAnalysis({
+              eventType: 'carryover_cancelled',
+              attackType: 'skill',
+              skillId: 'combo',
+              skillName: skillName(atkSkill),
+              hitIndex: 2,
+              hitType: 'combo_carryover_cancelled',
+              carryover: true,
+              actor: fighterRef(atk),
+              target: fighterRef(comboTarget),
+              reason: 'attacker_defeated_by_entry_battlecry',
+              damage: { displayed: 0, skipped: true },
+              stateBefore: { actor: fighterState(atk), target: fighterState(comboTarget) },
+              stateAfter: { actor: fighterState(atk), target: fighterState(comboTarget) },
+            });
+            return true;
+          }
         }
+
+        const comboRandomStart = currentRandomLog ? currentRandomLog.length : 0;
+        const comboVarianceRoll = rand('damage_variance_combo');
+        const comboVariance = 0.95 + comboVarianceRoll * 0.10;
+        if (developerLog && currentRandomLog?.length) currentRandomLog[currentRandomLog.length - 1].convertedValue = comboVariance;
 
         // 同じ戦闘内では、攻撃者・防御者ペアの初回抽選結果を以後も使用する。
         // simulateBattle6v6ごとにMapを作るため、1000回シミュレーションでは毎戦抽選される。
@@ -7351,6 +7375,60 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           entering.entryEffectsAppliedByCarryover = false;
         } else {
           applyEntryBattleCries(teamB[idxB], entering);
+        }
+      }
+
+      // キャリーオーバー先の参戦時戦吼などで攻撃側も倒れた場合は、
+      // 2発目を発生させず、元の防御側に続いて攻撃側も退場させる。
+      if (actor.hp <= 0) {
+        const survivingOpponent = isActorA ? teamB[idxB] : teamA[idxA];
+        push('log-winner', t('defeated', fighterName(actor)));
+        push('log-start', t('defeatedDetail',
+          fighterName(survivingOpponent), Math.max(0, survivingOpponent.hp), survivingOpponent.maxHP,
+          fighterName(actor), Math.max(0, actor.hp), actor.maxHP
+        ));
+        recordAnalysis({
+          eventType: 'defeat',
+          actor: fighterRef(survivingOpponent),
+          target: fighterRef(actor),
+          defeated: fighterRef(actor),
+          reason: 'entry_battlecry_during_carryover',
+          stateBefore: { actor: fighterState(survivingOpponent), target: fighterState(actor) },
+        });
+        applyDefeatPassives(survivingOpponent);
+
+        if (isActorA) {
+          idxA++;
+          if (idxA >= teamA.length) { winningTeam = 'B'; break; }
+          const entering = teamA[idxA];
+          armEntrySuppressions(entering, teamB[idxB]);
+          push('log-buff', t('joins', t('teamA'), fighterName(entering), entering.maxHP));
+          recordAnalysis({
+            eventType: 'entry',
+            actor: fighterRef(teamB[idxB]),
+            target: fighterRef(entering),
+            nextFighter: fighterRef(entering),
+            defeatedTeam: 'A',
+            carryoverEntryEffectsApplied: false,
+            stateAfter: { actor: fighterState(teamB[idxB]), target: fighterState(entering) },
+          });
+          applyEntryBattleCries(teamB[idxB], entering);
+        } else {
+          idxB++;
+          if (idxB >= teamB.length) { winningTeam = 'A'; break; }
+          const entering = teamB[idxB];
+          armEntrySuppressions(entering, teamA[idxA]);
+          push('log-buff', t('joins', t('teamB'), fighterName(entering), entering.maxHP));
+          recordAnalysis({
+            eventType: 'entry',
+            actor: fighterRef(teamA[idxA]),
+            target: fighterRef(entering),
+            nextFighter: fighterRef(entering),
+            defeatedTeam: 'B',
+            carryoverEntryEffectsApplied: false,
+            stateAfter: { actor: fighterState(teamA[idxA]), target: fighterState(entering) },
+          });
+          applyEntryBattleCries(teamA[idxA], entering);
         }
       }
 
