@@ -58,6 +58,55 @@ const app = loadBattleSim();
 }
 
 {
+  const comboUser = beast('test_combo_entry_battlecry_user', 'Combo Entry Battlecry User', {
+    agi: 300, atk: 100, dur: 25, will: 1,
+  }, [
+    { name: '攻撃-連撃', type: 'attack', rageCost: 0, effect: 'combo', param: 0.80 },
+  ]);
+  const replacement = beast('test_combo_entry_battlecry_replacement', 'Combo Entry Battlecry Replacement', {
+    agi: 200, atk: 500, dur: 100, will: 1,
+  }, []);
+  const firstTarget = beast('test_combo_entry_battlecry_first_target', 'Combo Entry Battlecry First Target', {
+    agi: 100, atk: 1, dur: 10, will: 1,
+  }, []);
+  const battlecryEntrant = beast('test_combo_entry_battlecry_entrant', 'Combo Entry Battlecry Entrant', {
+    agi: 100, atk: 1, dur: 100, will: 1,
+  }, [
+    { name: '戦吼-犠牲', type: 'battlecry', effect: 'sacrifice_damage', param: 0.25 },
+  ]);
+
+  const result = app.withSeededRandom(3944, () => app.simulateBattle6v6(
+    [comboUser, replacement],
+    [firstTarget, battlecryEntrant],
+    true,
+    { analysisMode: 'developer' }
+  ));
+  const entryDamageIndex = result.analysisEvents.findIndex(event =>
+    event.eventType === 'entry_damage' &&
+    event.skillId === 'sacrifice_damage' &&
+    event.target?.beastId === comboUser.id
+  );
+  const cancelledIndex = result.analysisEvents.findIndex(event =>
+    event.eventType === 'carryover_cancelled' && event.actor?.beastId === comboUser.id
+  );
+  const carriedHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'combo_carryover' &&
+    event.actor?.beastId === comboUser.id &&
+    event.target?.beastId === battlecryEntrant.id
+  );
+  const replacementEntry = result.analysisEvents.find(event =>
+    event.eventType === 'entry' && event.nextFighter?.beastId === replacement.id
+  );
+
+  assert(entryDamageIndex >= 0, 'the carryover target battlecry must resolve before the second hit');
+  assert(cancelledIndex > entryDamageIndex, 'carryover cancellation must be logged after entry battlecry damage');
+  assert.strictEqual(carriedHit, undefined, 'combo carryover damage must not occur after the attacker is defeated by entry battlecry');
+  assert.strictEqual(result.teamA[0].hp, 0, 'entry battlecry must defeat the combo attacker');
+  assert(replacementEntry, 'the defeated combo attacker must leave and its replacement must enter');
+}
+
+{
   assert.strictEqual(app.SKILL_SEAL_BLOCKS_DEFENSE_SKILLS, true, 'skill seal must block every defense skill');
 
   const cases = [
