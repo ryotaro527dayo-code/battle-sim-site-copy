@@ -73,6 +73,7 @@ return {
   defaultSkillLevels,
   calcNormalRageGain,
   applyOcrResultToSlot,
+  moveTeamSlot,
   simulateBattle6v6,
   withSeededRandom,
   battleAnalysisOptions,
