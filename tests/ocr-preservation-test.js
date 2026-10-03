@@ -78,4 +78,23 @@ assert.strictEqual(app.SLOT_STAT.A[0].agi, undefined);
   assert(result && ['A', 'B'].includes(result.winningTeam), 'Holy Light Unicorn must be usable in battle');
 }
 
+{
+  app.TEAM_SEL.B.splice(0, 6, 'kong', 'dark_rex', 'holy_light_unicorn', '', '', '');
+  app.SLOT_STAT.B[0] = {
+    lv: 91, stars: 4, dur: 901, atk: 451, agi: 401, will: 231, hp_start: 1234,
+    params: { 'combo.param': 0.77 },
+    skillLevels: { combo: { level: 3, source: 'manual', status: 'active' } },
+    disabledSkills: { wild: true },
+  };
+  app.SLOT_STAT.B[1] = { lv: 92, dur: 902, params: { 'slow.param': 0.20 } };
+  app.SLOT_STAT.B[2] = { lv: 93, dur: 903, params: { 'full_power.param': 2.30 } };
+  const movedStats = JSON.parse(JSON.stringify(app.SLOT_STAT.B[0]));
+
+  assert.strictEqual(app.moveTeamSlot('B', 0, 2), true);
+  assert.deepStrictEqual(app.TEAM_SEL.B.slice(0, 3), ['dark_rex', 'holy_light_unicorn', 'kong']);
+  assert.deepStrictEqual(app.SLOT_STAT.B[2], movedStats, 'all slot stats and skill settings must move with the beast');
+  assert.strictEqual(app.SLOT_STAT.B[0].lv, 92);
+  assert.strictEqual(app.SLOT_STAT.B[1].lv, 93);
+}
+
 console.log('ocr preservation ok');
