@@ -440,14 +440,38 @@
       letter-spacing: 0.05em;
     }
     .team-slot-wrap { margin-bottom: 4px; }
+    .team-slot-wrap.dragging { opacity: 0.45; }
+    .team-slot-wrap.drag-over .team-slot {
+      border-color: var(--gold);
+      box-shadow: 0 0 0 1px var(--gold);
+    }
     .team-slot {
       display: flex;
       align-items: center;
       gap: 5px;
       background: var(--panel2);
+      border: 1px solid transparent;
       border-radius: 5px;
       padding: 5px 7px;
     }
+    .slot-drag-handle {
+      width: 22px;
+      height: 26px;
+      flex: 0 0 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: none;
+      background: transparent;
+      color: var(--text-dim);
+      cursor: grab;
+      touch-action: none;
+      font-size: 1rem;
+      line-height: 1;
+    }
+    .slot-drag-handle:active { cursor: grabbing; color: var(--gold); }
+    .slot-drag-handle:focus-visible { outline: 1px solid var(--gold); border-radius: 3px; }
     .slot-num {
       color: var(--text-dim);
       font-size: 0.7rem;
@@ -1192,6 +1216,7 @@ const I18N = {
     ownTeam: '自チーム',
     previousEnemies: '前の相手',
     skillAdjust: 'スキル調整',
+    dragReorder: 'ドラッグして編成順を変更',
     chooseCharacter: 'キャラを選択してください',
     noAdjustments: '調整項目なし',
     unavailable: '調整不可',
@@ -1350,6 +1375,7 @@ const I18N = {
     ownTeam: 'Your Team',
     previousEnemies: 'Previous Opponents',
     skillAdjust: 'Adjust skills',
+    dragReorder: 'Drag to reorder the team',
     chooseCharacter: 'Select a character',
     noAdjustments: 'No adjustable items',
     unavailable: 'Not adjustable',
@@ -1508,6 +1534,7 @@ const I18N = {
     ownTeam: 'Ваша команда',
     previousEnemies: 'Прошлые соперники',
     skillAdjust: 'Настройка навыков',
+    dragReorder: 'Перетащите, чтобы изменить порядок',
     chooseCharacter: 'Выберите персонажа',
     noAdjustments: 'Нет настраиваемых параметров',
     unavailable: 'Нельзя настроить',
@@ -1666,6 +1693,7 @@ const I18N = {
     ownTeam: '我方队伍',
     previousEnemies: '之前的对手',
     skillAdjust: '技能调整',
+    dragReorder: '拖动以调整队伍顺序',
     chooseCharacter: '请选择角色',
     noAdjustments: '没有可调整项目',
     unavailable: '不可调整',
@@ -7468,8 +7496,21 @@ function initTeamBuilder() {
       const defVal = TEAM_SEL[side][i] || '';
       const wrap = document.createElement('div');
       wrap.className = 'team-slot-wrap';
+      wrap.dataset.side = side;
+      wrap.dataset.index = String(i);
+      wrap.ondragover = event => onTeamSlotDragOver(event, side, i);
+      wrap.ondrop = event => onTeamSlotDrop(event, side, i);
       wrap.innerHTML = `
         <div class="team-slot">
+          <button type="button" class="slot-drag-handle" draggable="true"
+            title="${t('dragReorder')}" aria-label="${t('dragReorder')} ${i+1}"
+            ondragstart="beginTeamSlotDrag(event,'${side}',${i})"
+            ondragend="endTeamSlotDrag()"
+            onpointerdown="beginTeamSlotPointerDrag(event,'${side}',${i})"
+            onpointermove="updateTeamSlotPointerDrag(event)"
+            onpointerup="endTeamSlotPointerDrag(event)"
+            onpointercancel="cancelTeamSlotPointerDrag(event)"
+            onkeydown="onTeamSlotHandleKeydown(event,'${side}',${i})">⠿</button>
           <span class="slot-num">${i+1}</span>
           <select id="sel${side}${i}" onchange="onSlotChange('${side}',${i})">${opts}</select>
           <span class="slot-agi" id="agi${side}${i}"></span>
@@ -7484,6 +7525,127 @@ function initTeamBuilder() {
       updateSlotAgi(side, i);
     }
   });
+}
+
+const TEAM_SLOT_DRAG = { side: null, fromIdx: -1, overIdx: -1, pointerId: null };
+
+function clearTeamSlotDragStyles() {
+  document.querySelectorAll('.team-slot-wrap.dragging, .team-slot-wrap.drag-over').forEach(el => {
+    el.classList.remove('dragging', 'drag-over');
+  });
+}
+
+function markTeamSlotDragTarget(side, idx) {
+  document.querySelectorAll('.team-slot-wrap.drag-over').forEach(el => el.classList.remove('drag-over'));
+  const target = document.querySelector(`.team-slot-wrap[data-side="${side}"][data-index="${idx}"]`);
+  if (target && idx !== TEAM_SLOT_DRAG.fromIdx) target.classList.add('drag-over');
+  TEAM_SLOT_DRAG.overIdx = idx;
+}
+
+function moveTeamSlot(side, fromIdx, toIdx) {
+  if (!TEAM_SEL[side] || !SLOT_STAT[side]) return false;
+  fromIdx = Number(fromIdx);
+  toIdx = Number(toIdx);
+  if (!Number.isInteger(fromIdx) || !Number.isInteger(toIdx) || fromIdx < 0 || fromIdx >= 6 || toIdx < 0 || toIdx >= 6 || fromIdx === toIdx) return false;
+
+  const [movedId] = TEAM_SEL[side].splice(fromIdx, 1);
+  TEAM_SEL[side].splice(toIdx, 0, movedId);
+
+  const slotStats = Array.from({ length: 6 }, (_, idx) => SLOT_STAT[side][idx] || {});
+  const [movedStats] = slotStats.splice(fromIdx, 1);
+  slotStats.splice(toIdx, 0, movedStats);
+  Object.keys(SLOT_STAT[side]).forEach(key => delete SLOT_STAT[side][key]);
+  slotStats.forEach((stats, idx) => { SLOT_STAT[side][idx] = stats; });
+
+  saveToStorage();
+  rebuildTeamBuilder();
+  return true;
+}
+
+function beginTeamSlotDrag(event, side, idx) {
+  TEAM_SLOT_DRAG.side = side;
+  TEAM_SLOT_DRAG.fromIdx = idx;
+  TEAM_SLOT_DRAG.overIdx = idx;
+  TEAM_SLOT_DRAG.pointerId = null;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', `${side}:${idx}`);
+  event.currentTarget.closest('.team-slot-wrap')?.classList.add('dragging');
+}
+
+function onTeamSlotDragOver(event, side, idx) {
+  if (TEAM_SLOT_DRAG.side !== side) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  markTeamSlotDragTarget(side, idx);
+}
+
+function onTeamSlotDrop(event, side, idx) {
+  if (TEAM_SLOT_DRAG.side !== side) return;
+  event.preventDefault();
+  const fromIdx = TEAM_SLOT_DRAG.fromIdx;
+  clearTeamSlotDragStyles();
+  TEAM_SLOT_DRAG.side = null;
+  TEAM_SLOT_DRAG.fromIdx = -1;
+  TEAM_SLOT_DRAG.overIdx = -1;
+  moveTeamSlot(side, fromIdx, idx);
+}
+
+function endTeamSlotDrag() {
+  clearTeamSlotDragStyles();
+  TEAM_SLOT_DRAG.side = null;
+  TEAM_SLOT_DRAG.fromIdx = -1;
+  TEAM_SLOT_DRAG.overIdx = -1;
+}
+
+function beginTeamSlotPointerDrag(event, side, idx) {
+  if (event.pointerType === 'mouse') return;
+  event.preventDefault();
+  TEAM_SLOT_DRAG.side = side;
+  TEAM_SLOT_DRAG.fromIdx = idx;
+  TEAM_SLOT_DRAG.overIdx = idx;
+  TEAM_SLOT_DRAG.pointerId = event.pointerId;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  event.currentTarget.closest('.team-slot-wrap')?.classList.add('dragging');
+}
+
+function updateTeamSlotPointerDrag(event) {
+  if (TEAM_SLOT_DRAG.pointerId !== event.pointerId || !TEAM_SLOT_DRAG.side) return;
+  event.preventDefault();
+  const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.team-slot-wrap');
+  if (target?.dataset.side === TEAM_SLOT_DRAG.side) {
+    markTeamSlotDragTarget(TEAM_SLOT_DRAG.side, Number(target.dataset.index));
+  }
+}
+
+function finishTeamSlotPointerDrag(event, shouldMove) {
+  if (TEAM_SLOT_DRAG.pointerId !== event.pointerId) return;
+  const side = TEAM_SLOT_DRAG.side;
+  const fromIdx = TEAM_SLOT_DRAG.fromIdx;
+  const toIdx = TEAM_SLOT_DRAG.overIdx;
+  event.currentTarget.releasePointerCapture?.(event.pointerId);
+  clearTeamSlotDragStyles();
+  TEAM_SLOT_DRAG.side = null;
+  TEAM_SLOT_DRAG.fromIdx = -1;
+  TEAM_SLOT_DRAG.overIdx = -1;
+  TEAM_SLOT_DRAG.pointerId = null;
+  if (shouldMove && side) moveTeamSlot(side, fromIdx, toIdx);
+}
+
+function endTeamSlotPointerDrag(event) {
+  finishTeamSlotPointerDrag(event, true);
+}
+
+function cancelTeamSlotPointerDrag(event) {
+  finishTeamSlotPointerDrag(event, false);
+}
+
+function onTeamSlotHandleKeydown(event, side, idx) {
+  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+  event.preventDefault();
+  const toIdx = idx + (event.key === 'ArrowUp' ? -1 : 1);
+  if (moveTeamSlot(side, idx, toIdx)) {
+    document.querySelector(`.team-slot-wrap[data-side="${side}"][data-index="${toIdx}"] .slot-drag-handle`)?.focus();
+  }
 }
 
 function rebuildTeamBuilder() {
