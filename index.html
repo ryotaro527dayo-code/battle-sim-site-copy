@@ -5494,6 +5494,61 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     push('log-debuff', t('poisonApply', fighterName(target), amount, target.poisonStacks));
   };
 
+  const applyLacerateAttackTick = (fighter, hitIndex) => {
+    if (fighter.lacerateTurns <= 0 || fighter.hp <= 0) return false;
+    const lacerateStateBefore = { actor: fighterState(fighter), target: fighterState(fighter) };
+    const hpBeforeLacerate = fighter.hp;
+    const turnsBeforeLacerate = fighter.lacerateTurns;
+    const bleedDmg = Math.round(fighter.maxHP * fighter.lacerateParam);
+    const hpAfterLacerateBeforeClamp = hpBeforeLacerate - bleedDmg;
+    fighter.hp = Math.max(0, hpAfterLacerateBeforeClamp);
+    fighter.lacerateTurns--;
+    push('log-debuff', t('bleedBefore', fighterName(fighter), bleedDmg, fighter.hp));
+    checkUndying(fighter);
+    recordAnalysis({
+      eventType: 'status_damage',
+      attackType: 'status',
+      skillId: 'lacerate',
+      skillName: entity('skill_lacerate'),
+      hitIndex,
+      hitType: 'lacerate_on_attack',
+      actor: fighterRef(fighter),
+      target: fighterRef(fighter),
+      stateBefore: lacerateStateBefore,
+      damage: {
+        type: 'lacerate_on_attack',
+        displayed: bleedDmg,
+        hpBefore: hpBeforeLacerate,
+        hpAfterDamageBeforeClamp: hpAfterLacerateBeforeClamp,
+        hpAfter: fighter.hp,
+        lethal: hpAfterLacerateBeforeClamp <= 0,
+      },
+      debugCalculation: Object.assign(emptyDebugCalculation(), {
+        hp: makeHpDebug({
+          hpBefore: hpBeforeLacerate,
+          damageApplied: -bleedDmg,
+          hpAfterDamageBeforeClamp: hpAfterLacerateBeforeClamp,
+          hpAfterClamp: Math.max(0, hpAfterLacerateBeforeClamp),
+          healing: fighter.hp - Math.max(0, hpAfterLacerateBeforeClamp),
+          maxHpBefore: fighter.maxHP,
+          maxHpAfter: fighter.maxHP,
+          finalHp: fighter.hp,
+          damageSource: 'lacerate_on_attack',
+        }),
+        statusChanges: [{
+          status: 'lacerateTurns',
+          before: turnsBeforeLacerate,
+          delta: -1,
+          after: fighter.lacerateTurns,
+          reason: fighter.lacerateTurns === 0 ? 'expired' : 'attack_consumed',
+          timing: hitIndex === 2 ? 'combo_second_hit' : 'action_start',
+        }],
+      }),
+      stateAfter: { actor: fighterState(fighter), target: fighterState(fighter) },
+    });
+    return fighter.hp <= 0;
+  };
+
   const doAttack = (atk, def, defTeam, defIdx) => {
     const noRageGain = atk.suppressRageGain;
     atk.suppressRageGain = false;
@@ -5524,60 +5579,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     let attackSkillInfo = null;
     let mainDamageInfo = null;
 
-    // 傷口裂傷: 影響を受けた猛獣自身が攻撃する時に最大HP割合ダメージを受ける。
-    if (atk.lacerateTurns > 0) {
-      const lacerateStateBefore = { actor: fighterState(atk), target: fighterState(atk) };
-      const hpBeforeLacerate = atk.hp;
-      const turnsBeforeLacerate = atk.lacerateTurns;
-      const bleedDmg = Math.round(atk.maxHP * atk.lacerateParam);
-      const hpAfterLacerateBeforeClamp = hpBeforeLacerate - bleedDmg;
-      atk.hp = Math.max(0, hpAfterLacerateBeforeClamp);
-      atk.lacerateTurns--;
-      push('log-debuff', t('bleedBefore', fighterName(atk), bleedDmg, atk.hp));
-      checkUndying(atk);
-      recordAnalysis({
-        eventType: 'status_damage',
-        attackType: 'status',
-        skillId: 'lacerate',
-        skillName: entity('skill_lacerate'),
-        hitIndex: 'status',
-        hitType: 'lacerate_on_attack',
-        actor: fighterRef(atk),
-        target: fighterRef(atk),
-        stateBefore: lacerateStateBefore,
-        damage: {
-          type: 'lacerate_on_attack',
-          displayed: bleedDmg,
-          hpBefore: hpBeforeLacerate,
-          hpAfterDamageBeforeClamp: hpAfterLacerateBeforeClamp,
-          hpAfter: atk.hp,
-          lethal: hpAfterLacerateBeforeClamp <= 0,
-        },
-        debugCalculation: Object.assign(emptyDebugCalculation(), {
-          hp: makeHpDebug({
-            hpBefore: hpBeforeLacerate,
-            damageApplied: -bleedDmg,
-            hpAfterDamageBeforeClamp: hpAfterLacerateBeforeClamp,
-            hpAfterClamp: Math.max(0, hpAfterLacerateBeforeClamp),
-            healing: atk.hp - Math.max(0, hpAfterLacerateBeforeClamp),
-            maxHpBefore: atk.maxHP,
-            maxHpAfter: atk.maxHP,
-            finalHp: atk.hp,
-            damageSource: 'lacerate_on_attack',
-          }),
-          statusChanges: [{
-            status: 'lacerateTurns',
-            before: turnsBeforeLacerate,
-            delta: -1,
-            after: atk.lacerateTurns,
-            reason: atk.lacerateTurns === 0 ? 'expired' : 'attack_consumed',
-            timing: 'action_start',
-          }],
-        }),
-        stateAfter: { actor: fighterState(atk), target: fighterState(atk) },
-      });
-      if (atk.hp <= 0) return false;
-    }
+    if (applyLacerateAttackTick(atk, 1)) return false;
     const carryoverTargetName = (target) => {
       const side = defTeam === teamA ? t('teamA') : t('teamB');
       return `${side}: ${fighterName(target)}`;
@@ -5743,12 +5745,38 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         removed += amount;
         removalBudget -= amount;
       }
-      const heal = removed * getParam(def.data, 'purify', 'param', defReactSkill.param || 40);
+      const healPerDebuff = getParam(def.data, 'purify', 'param', defReactSkill.param || 40);
+      const removedDebuffHeal = removed * healPerDebuff;
+      const godPowerSkill = def.data.id === 'silver_frost_rex'
+        ? def.data.skills.find(skill => skill.type === 'battlecry' && skill.effect === 'god_power')
+        : null;
+      const godPowerModifierActive = !!godPowerSkill && def.speedModifiers.some(modifier =>
+        modifier.id === 'warcry-god-power'
+      );
+      const godPowerSpeedDebuff = godPowerModifierActive
+        ? getParam(def.data, 'god_power', 'param2', godPowerSkill.param2 || 0.08)
+        : 0;
+      const godPowerDebuffPoints = Math.round(godPowerSpeedDebuff * 100);
+      const godPowerHeal = godPowerDebuffPoints * healPerDebuff;
+      const heal = removedDebuffHeal + godPowerHeal;
       if (heal > 0) def.hp = Math.min(def.maxHP, def.hp + heal);
-      info.effects.push({ type: 'purify', removed, heal });
+      info.effects.push({
+        type: 'purify',
+        removed,
+        heal,
+        removedDebuffHeal,
+        godPowerHeal,
+      });
       info.purify = {
         removed,
         heal,
+        healPerDebuff,
+        removedDebuffHeal,
+        godPowerSpeedDebuff,
+        godPowerDebuffPoints,
+        godPowerHeal,
+        godPowerRetained: godPowerModifierActive,
+        healingTiming: 'before_incoming_damage',
         hpBefore: hpBeforePurify,
         hpAfter: def.hp,
         maxHpBefore: maxHpBeforePurify,
@@ -6560,6 +6588,25 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
             });
             return true;
           }
+        }
+
+        // 連撃は2回攻撃として、2発目の直前にも裂傷を1回消費する。
+        if (applyLacerateAttackTick(atk, 2)) {
+          recordAnalysis({
+            eventType: 'combo_second_hit_cancelled',
+            attackType: 'skill',
+            skillId: 'combo',
+            skillName: skillName(atkSkill),
+            hitIndex: 2,
+            hitType: comboCarryOver ? 'combo_carryover_cancelled' : 'combo_cancelled',
+            carryover: comboCarryOver,
+            actor: fighterRef(atk),
+            target: fighterRef(comboTarget),
+            reason: 'attacker_defeated_by_lacerate',
+            damage: { displayed: 0, skipped: true },
+            stateAfter: { actor: fighterState(atk), target: fighterState(comboTarget) },
+          });
+          return def.hp <= 0;
         }
 
         const comboRandomStart = currentRandomLog ? currentRandomLog.length : 0;
