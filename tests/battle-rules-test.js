@@ -220,15 +220,15 @@ const app = loadBattleSim();
   assert(slowStatus, 'slow application must produce an analysis status event');
   const progress = slowStatus.debugCalculation.status;
   assert.strictEqual(progress.oldEffectiveAgi, 150, 'slow log must record effective AGI before application');
-  assert.strictEqual(progress.newEffectiveAgi, 150, 'attack-skill slow must not change action-gauge AGI by default');
+  assert.strictEqual(progress.newEffectiveAgi, 75, 'attack-skill slow must change action-gauge AGI immediately by default');
   assert.strictEqual(progress.agiAfter, 75, 'attack-skill slow must still change display AGI');
   assert.strictEqual(progress.actionGauge, 750, 'slow must preserve the action gauge accumulated before application');
   assert.strictEqual(progress.actionProgressPreserved, true, 'slow log must mark action progress as preserved');
   assert(Math.abs(progress.oldInterval - (1000 / 150)) < 1e-12, 'slow log must record the old interval');
   assert(Math.abs(progress.oldRemainingTime - (250 / 150)) < 1e-12, 'slow log must record old remaining time');
   assert(Math.abs(progress.progressRatio - 0.75) < 1e-12, 'slow log must record the preserved progress ratio');
-  assert(Math.abs(progress.newInterval - (1000 / 150)) < 1e-12, 'default action-gauge interval must exclude attack-skill slow');
-  assert(Math.abs(progress.newRemainingTime - (250 / 150)) < 1e-12, 'remaining time must preserve progress at unchanged action-gauge AGI');
+  assert(Math.abs(progress.newInterval - (1000 / 75)) < 1e-12, 'default action-gauge interval must include attack-skill slow');
+  assert(Math.abs(progress.newRemainingTime - (250 / 75)) < 1e-12, 'remaining time must preserve progress while using the slowed action-gauge AGI');
 }
 
 {
@@ -434,8 +434,8 @@ const app = loadBattleSim();
 {
   assert.strictEqual(
     app.ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE,
-    false,
-    'attack-skill speed must not affect the action gauge by default'
+    true,
+    'attack-skill speed must affect the action gauge by default'
   );
 
   const slowSource = beast('test_speed_mode_source', 'Speed Mode Source', {
@@ -470,10 +470,10 @@ const app = loadBattleSim();
   assert.strictEqual(defaultSlow.stateAfter.target.agi, 50, 'default mode must apply slow to display AGI');
   assert.strictEqual(onSlow.debugCalculation.status.actionGaugeAgiAfter, 50, 'gauge ON must use slowed AGI for action timing');
   assert.strictEqual(offSlow.debugCalculation.status.actionGaugeAgiAfter, 100, 'gauge OFF must exclude attack-skill slow from action timing');
-  assert.strictEqual(defaultSlow.debugCalculation.status.actionGaugeAgiAfter, 100, 'default action timing must exclude attack-skill slow');
+  assert.strictEqual(defaultSlow.debugCalculation.status.actionGaugeAgiAfter, 50, 'default action timing must include attack-skill slow');
   assert.strictEqual(onActions[1].actor.beastId, slowSource.id, 'gauge ON must delay the slowed target');
   assert.strictEqual(offActions[1].actor.beastId, slowTarget.id, 'gauge OFF must preserve the target action-gauge speed');
-  assert.strictEqual(defaultActions[1].actor.beastId, slowTarget.id, 'default mode must preserve the target action-gauge speed');
+  assert.strictEqual(defaultActions[1].actor.beastId, slowSource.id, 'default mode must delay the slowed target immediately after the skill');
   assert.strictEqual(
     gaugeOff.actionGaugeSpeedModifierEnabled[app.SpeedModifierType.ATTACK_SKILL],
     false,
@@ -1043,7 +1043,7 @@ const app = loadBattleSim();
   const dacentrurus = beast('test_dacentrurus_purify_waver', 'Dacentrurus Purify Waver', {
     agi: 200, atk: 100, dur: 100, will: 1,
   }, [
-    { name: '防御-浄化術', type: 'defense', rageCost: 0, effect: 'purify', param: 8 },
+    { name: '防御-浄化術', type: 'defense', rageCost: 0, effect: 'purify', param: 40 },
     { name: '戦吼-動揺', type: 'battlecry', effect: 'waver', param: 0.30, param2: 0.10 },
   ]);
   dacentrurus.hp_start = 300;
@@ -1073,7 +1073,8 @@ const app = loadBattleSim();
     'purify must remove the two remaining attack-down turns'
   );
   assert.strictEqual(purifyHit.defense.purify.hpBefore, 300);
-  assert.strictEqual(purifyHit.defense.purify.hpAfter, 316, 'purify must heal for two removed stacks at 8 HP each');
+  assert.strictEqual(purifyHit.defense.purify.removed, 2, 'Lv4 purify must remove exactly two debuff stacks');
+  assert.strictEqual(purifyHit.defense.purify.hpAfter, 380, 'Lv4 purify must heal 40 HP for each of two removed stacks');
   assert.strictEqual(
     purifyHit.defense.purify.dakentrulusAttackUpScheduledEffect.scheduled,
     true,
@@ -1129,6 +1130,46 @@ const app = loadBattleSim();
   assert(logText.includes('硬化皮膚'), 'defender harden should reduce quake');
   assert(!logText.includes('quake_harden_link'), 'hidden harden reservation marker must never appear');
   assert.strictEqual(result.teamA[0].hardenSource, null, 'quake user must not receive hidden harden reservation');
+}
+
+{
+  assert.strictEqual(app.SKILL_LEVEL_VALUE_TABLE.lacerate[4].param, 0.16, 'Lv4 lacerate must use 16% max HP');
+  assert.strictEqual(app.SKILL_LEVEL_VALUE_TABLE.purify[4].param, 40, 'Lv4 purify must heal 40 HP per removed stack');
+
+  const lacerateSource = beast('test_lacerate_source', 'Lacerate Source', {
+    agi: 101, atk: 1, dur: 10, will: 1,
+  }, [
+    { name: '攻撃-傷口裂傷', type: 'attack', rageCost: 0, effect: 'lacerate', param: 0.16 },
+  ]);
+  const sourceBench = beast('test_lacerate_source_bench', 'Lacerate Source Bench', {
+    agi: 1, atk: 1, dur: 10000, will: 1,
+  }, []);
+  const lacerateTarget = beast('test_lacerate_target', 'Lacerate Target', {
+    agi: 100, atk: 100, dur: 1000, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(1616, () =>
+    app.simulateBattle6v6(
+      [lacerateSource, sourceBench],
+      [lacerateTarget],
+      true,
+      { analysisMode: 'developer' }
+    )
+  );
+  const bleedEvents = result.analysisEvents.filter(event =>
+    event.eventType === 'status_damage' &&
+    event.skillId === 'lacerate' &&
+    event.target?.beastId === lacerateTarget.id
+  );
+
+  assert.strictEqual(bleedEvents.length, 3, 'lacerate must damage the affected beast on exactly three of its own attacks');
+  assert.deepStrictEqual(bleedEvents.map(event => event.damage.displayed), [640, 640, 640], 'each lacerate tick must deal 16% of max HP');
+  assert.deepStrictEqual(
+    bleedEvents.map(event => event.debugCalculation.statusChanges[0].after),
+    [2, 1, 0],
+    'lacerate must consume one remaining attack per affected-beast attack'
+  );
+  assert(bleedEvents.every(event => event.actor.beastId === lacerateTarget.id), 'lacerate must trigger from the affected beast, not when another beast attacks it');
 }
 
 {
