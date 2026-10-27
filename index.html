@@ -2024,7 +2024,9 @@ function loadFromStorage() {
     if (ts) { const d = JSON.parse(ts); Object.assign(TEAM_SEL.A, d.A); Object.assign(TEAM_SEL.B, d.B); }
     const ps = localStorage.getItem('battleSim_PLAYER_PRESETS');
     if (ps) PLAYER_PRESETS.splice(0, PLAYER_PRESETS.length, ...JSON.parse(ps));
-    if (migrateFullPowerLv4Defaults()) saveToStorage();
+    const migratedFullPower = migrateFullPowerLv4Defaults();
+    const migratedSkillBalance = migrateSkillBalanceLv4Defaults();
+    if (migratedFullPower || migratedSkillBalance) saveToStorage();
   } catch(e) {}
 }
 
@@ -2049,6 +2051,46 @@ function migrateFullPowerLv4Defaults() {
         changed = true;
       }
     });
+  });
+  return changed;
+}
+
+function migrateSkillBalanceLv4Defaults() {
+  let changed = false;
+  const rules = [
+    { effect: 'lacerate', from: 0.05, to: 0.16 },
+    { effect: 'purify', from: 8, to: 40 },
+  ];
+  const migrateStats = (charId, stats) => {
+    if (!stats?.params) return;
+    rules.forEach(rule => {
+      const key = `${rule.effect}.param`;
+      if (stats.params[key] !== rule.from) return;
+      if (!CHARS[charId]?.skills?.some(skill => skill.effect === rule.effect)) return;
+      const savedLevel = stats.skillLevels?.[rule.effect]?.level;
+      if (savedLevel !== undefined && savedLevel !== 4) return;
+      stats.params[key] = rule.to;
+      changed = true;
+    });
+  };
+  const migrateOverrides = (overrides) => {
+    if (!overrides) return;
+    rules.forEach(rule => {
+      Object.keys(overrides).forEach(key => {
+        if (key.endsWith(`.${rule.effect}.param`) && overrides[key] === rule.from) {
+          overrides[key] = rule.to;
+          changed = true;
+        }
+      });
+    });
+  };
+  ['A', 'B'].forEach(side => {
+    TEAM_SEL[side].forEach((charId, idx) => migrateStats(charId, SLOT_STAT[side]?.[idx]));
+  });
+  migrateOverrides(OVERRIDES);
+  PLAYER_PRESETS.forEach(preset => {
+    (preset.slots || []).forEach((charId, idx) => migrateStats(charId, preset.slotStats?.[idx]));
+    migrateOverrides(preset.overrides);
   });
   return changed;
 }
@@ -2278,7 +2320,7 @@ const PARAM_INFO = {
   drain:         { param: ['param_drain',         true,  0.40] },
   slow:          { param: ['param_slow',          true,  0.12] },
   quake:         { param: ['param_quake',         true,  1.40], param2: ['param_bench', true, 0] },
-  lacerate:      { param: ['param_lacerate',      true,  0.045]},
+  lacerate:      { param: ['param_lacerate',      true,  0.16 ]},
   thorns:        { param: ['param_thorns',        true,  0.20] },
   heavy_wound:   { param: ['param_heavy_wound',   true,  0.20] },
   sacrifice:     { param: ['param_sacrifice_hp',  true,  0.10], param2: ['param_sacrifice_atk', true, 0.225] },
@@ -2297,7 +2339,7 @@ const PARAM_INFO = {
   hunter_mark:   { param: ['param_hunter_mark',   false, 9   ], param2: ['param_hunter_mark_max', false, 90] },
   rapid:         { param: ['param_rapid_speed',   true,  0.12], param2: ['param_rapid_atk_down', true, 0.08] },
   attack_talent: { param: ['param_attack_talent', false, 3   ] },
-  purify:        { param: ['param_purify',        false, 5   ] },
+  purify:        { param: ['param_purify',        false, 40  ] },
   undying:       { param: ['param_undying',       true,  0.05] },
   waver:         { param: ['param_waver_late',    true, 0.15], param2: ['param_waver_early', true, 0.10] },
 };
@@ -2431,7 +2473,7 @@ const CHARS = {
     id: 'mini_rex', name: 'ミニレックス', lv: 100, stars: 5, team: 'enemy',
     dur: 410, atk: 207, agi: 207, will: 233,
     skills: [
-      { name: '攻撃-傷口裂傷', type: 'attack', rageCost: 50, effect: 'lacerate', param: 0.05, desc: '敵が攻撃前に最大HP5%出血(3回)' },
+      { name: '攻撃-傷口裂傷', type: 'attack', rageCost: 50, effect: 'lacerate', param: 0.16, desc: '敵が攻撃時に最大HP16%出血(3回)' },
       { name: '防御-荊棘外殻', type: 'defense', rageCost: 50, effect: 'thorns', param: 0.25, desc: '被ダメの25%反射' }
     ]
   },
@@ -2449,7 +2491,7 @@ const CHARS = {
     dur: 818, atk: 410, agi: 410, will: 238,
     skills: [
       { name: '攻撃-吸血', type: 'attack', rageCost: 50, effect: 'drain', param: 0.40, desc: '与ダメの40%HP回復' },
-      { name: '防御-浄化術', type: 'defense', rageCost: 50, effect: 'purify', param: 8, desc: 'デバフ2スタック除去+8HP/スタック' },
+      { name: '防御-浄化術', type: 'defense', rageCost: 50, effect: 'purify', param: 40, desc: 'デバフ2スタック除去+40HP/スタック' },
       { name: 'パッシブ-野性', type: 'passive', effect: 'wild', param: 0.05, desc: 'HP10%毎に攻撃力+5%' }
     ]
   },
@@ -2711,7 +2753,7 @@ const CHARS = {
     dur: 837, atk: 415, agi: 415, will: 232,
     skills: [
       { name: '攻撃-突破', type: 'attack', rageCost: 50, effect: 'breakthrough', param: 13, desc: '敵レイジ-13' },
-      { name: '防御-浄化術', type: 'defense', rageCost: 50, effect: 'purify', param: 8, desc: 'デバフ2スタック除去+8HP/スタック' },
+      { name: '防御-浄化術', type: 'defense', rageCost: 50, effect: 'purify', param: 40, desc: 'デバフ2スタック除去+40HP/スタック' },
       { name: '戦吼-動揺', type: 'battlecry', effect: 'waver', param: 0.30, param2: 0.10, desc: '最初3回攻撃-10%、その後3回攻撃+30%' }
     ]
   },
@@ -2719,8 +2761,8 @@ const CHARS = {
     id: 'silver_frost_rex', name: '銀霜レックス', lv: 100, stars: 5, team: 'enemy',
     dur: 832, atk: 418, agi: 415, will: 240,
     skills: [
-      { name: '攻撃-傷口裂傷', type: 'attack', rageCost: 50, effect: 'lacerate', param: 0.05, desc: '敵が攻撃前に最大HP5%出血(3回)' },
-      { name: '防御-浄化術', type: 'defense', rageCost: 50, effect: 'purify', param: 8, desc: 'デバフ2スタック除去+8HP/スタック' },
+      { name: '攻撃-傷口裂傷', type: 'attack', rageCost: 50, effect: 'lacerate', param: 0.16, desc: '敵が攻撃時に最大HP16%出血(3回)' },
+      { name: '防御-浄化術', type: 'defense', rageCost: 50, effect: 'purify', param: 40, desc: 'デバフ2スタック除去+40HP/スタック' },
       { name: '戦吼-神力', type: 'battlecry', effect: 'god_power', param: 0.12, param2: 0.08, desc: '攻撃力+12%、速度-8%' }
     ]
   }
@@ -2788,7 +2830,7 @@ const SKILL_LEVEL_VALUE_TABLE = {
     1: { rageCost: 40, param: 5 },
     2: { rageCost: 40, param: 5 },
     3: { rageCost: 50, param: 8 },
-    4: { rageCost: 50, param: 8 },
+    4: { rageCost: 50, param: 40 },
   },
   drain: {
     1: { rageCost: 40, param: 0.30 },
@@ -2812,7 +2854,7 @@ const SKILL_LEVEL_VALUE_TABLE = {
     1: { rageCost: 40, param: 0.045 },
     2: { rageCost: 40, param: 0.045 },
     3: { rageCost: 50, param: 0.05 },
-    4: { rageCost: 50, param: 0.05 },
+    4: { rageCost: 50, param: 0.16 },
   },
   counter: { 4: { rageCost: 40, param: 0.25 } },
   backwater: { 4: { param: 0.15, param2: 2 } },
@@ -2853,8 +2895,8 @@ const SKILL_LV4_EFFECTS = {
     torment: { param: 0.30 },
   },
   silver_frost_rex: {
-    lacerate: { rageCost: 50, param: 0.05 },
-    purify: { rageCost: 50, param: 8 },
+    lacerate: { rageCost: 50, param: 0.16 },
+    purify: { rageCost: 50, param: 40 },
     god_power: { param: 0.12, param2: 0.08 },
   },
   ice_ptera: {
@@ -2979,7 +3021,7 @@ const SKILL_LV4_EFFECTS = {
   },
   dacentrurus: {
     breakthrough: { rageCost: 50, param: 13 },
-    purify: { rageCost: 50, param: 8 },
+    purify: { rageCost: 50, param: 40 },
     waver: { param: 0.30, param2: 0.10 },
   },
   gigant: {
@@ -3008,12 +3050,12 @@ const SKILL_LV4_EFFECTS = {
     hunter_mark: { param: 12, param2: 120 },
   },
   mini_rex: {
-    lacerate: { rageCost: 50, param: 0.05 },
+    lacerate: { rageCost: 50, param: 0.16 },
     thorns: { rageCost: 50, param: 0.25 },
   },
   tyrannorex: {
     drain: { rageCost: 50, param: 0.40 },
-    purify: { rageCost: 50, param: 8 },
+    purify: { rageCost: 50, param: 40 },
     wild: { param: 0.05 },
   },
 };
@@ -4368,7 +4410,7 @@ const SpeedModifierType = Object.freeze({
   EQUIPMENT: 'equipment',
   STATUS: 'status',
 });
-const ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE = false;
+const ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE = true;
 const DEFAULT_ACTION_GAUGE_SPEED_MODIFIER_ENABLED = Object.freeze({
   [SpeedModifierType.WARCRY]: true,
   [SpeedModifierType.ATTACK_SKILL]: ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE,
@@ -5481,6 +5523,61 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
     let mainDodgeInfo = null;
     let attackSkillInfo = null;
     let mainDamageInfo = null;
+
+    // 傷口裂傷: 影響を受けた猛獣自身が攻撃する時に最大HP割合ダメージを受ける。
+    if (atk.lacerateTurns > 0) {
+      const lacerateStateBefore = { actor: fighterState(atk), target: fighterState(atk) };
+      const hpBeforeLacerate = atk.hp;
+      const turnsBeforeLacerate = atk.lacerateTurns;
+      const bleedDmg = Math.round(atk.maxHP * atk.lacerateParam);
+      const hpAfterLacerateBeforeClamp = hpBeforeLacerate - bleedDmg;
+      atk.hp = Math.max(0, hpAfterLacerateBeforeClamp);
+      atk.lacerateTurns--;
+      push('log-debuff', t('bleedBefore', fighterName(atk), bleedDmg, atk.hp));
+      checkUndying(atk);
+      recordAnalysis({
+        eventType: 'status_damage',
+        attackType: 'status',
+        skillId: 'lacerate',
+        skillName: entity('skill_lacerate'),
+        hitIndex: 'status',
+        hitType: 'lacerate_on_attack',
+        actor: fighterRef(atk),
+        target: fighterRef(atk),
+        stateBefore: lacerateStateBefore,
+        damage: {
+          type: 'lacerate_on_attack',
+          displayed: bleedDmg,
+          hpBefore: hpBeforeLacerate,
+          hpAfterDamageBeforeClamp: hpAfterLacerateBeforeClamp,
+          hpAfter: atk.hp,
+          lethal: hpAfterLacerateBeforeClamp <= 0,
+        },
+        debugCalculation: Object.assign(emptyDebugCalculation(), {
+          hp: makeHpDebug({
+            hpBefore: hpBeforeLacerate,
+            damageApplied: -bleedDmg,
+            hpAfterDamageBeforeClamp: hpAfterLacerateBeforeClamp,
+            hpAfterClamp: Math.max(0, hpAfterLacerateBeforeClamp),
+            healing: atk.hp - Math.max(0, hpAfterLacerateBeforeClamp),
+            maxHpBefore: atk.maxHP,
+            maxHpAfter: atk.maxHP,
+            finalHp: atk.hp,
+            damageSource: 'lacerate_on_attack',
+          }),
+          statusChanges: [{
+            status: 'lacerateTurns',
+            before: turnsBeforeLacerate,
+            delta: -1,
+            after: atk.lacerateTurns,
+            reason: atk.lacerateTurns === 0 ? 'expired' : 'attack_consumed',
+            timing: 'action_start',
+          }],
+        }),
+        stateAfter: { actor: fighterState(atk), target: fighterState(atk) },
+      });
+      if (atk.hp <= 0) return false;
+    }
     const carryoverTargetName = (target) => {
       const side = defTeam === teamA ? t('teamA') : t('teamB');
       return `${side}: ${fighterName(target)}`;
@@ -5595,35 +5692,62 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
       push('log-skill', t('defDodgeUse', fighterName(def), skillName(defReactSkill), Math.round(def.defDodgeParam*100)));
     } else if (defReactSkill.effect === 'purify') {
       let removed = 0;
+      let removalBudget = 2;
       const hpBeforePurify = def.hp;
       const maxHpBeforePurify = def.maxHP;
       def.syncDakentrulusWaverState();
       let dakentrulusAttackDownRemoved = null;
-      if (def.dakentrulusAttackDownDebuff?.active) {
+      if (removalBudget > 0 && def.dakentrulusAttackDownDebuff?.active) {
         const down = def.dakentrulusAttackDownDebuff;
+        const remainingTurnsBefore = Math.max(1, down.remainingTurns || 0);
+        const removedStacks = Math.min(removalBudget, remainingTurnsBefore);
         dakentrulusAttackDownRemoved = {
-          remainingTurnsBefore: down.remainingTurns,
+          remainingTurnsBefore,
+          remainingTurnsAfter: remainingTurnsBefore - removedStacks,
+          removedStacks,
           attackDown: down.attackDown,
         };
-        down.active = false;
-        down.cleansed = true;
-        down.remainingTurns = 0;
-        removed++;
+        down.remainingTurns = remainingTurnsBefore - removedStacks;
+        removed += removedStacks;
+        removalBudget -= removedStacks;
+        if (down.remainingTurns <= 0) {
+          down.active = false;
+          down.cleansed = true;
+        }
       }
-      if (def.damageBonusTurns > 0) { def.damageBonusTurns = Math.max(0, def.damageBonusTurns - 2); removed++; }
-      if (def.slowEffects.length > 0) {
-        const purifyTarget = def.slowEffects[0];
-        purifyTarget.attacksUntilRemoval = Math.max(0, purifyTarget.attacksUntilRemoval - 2);
+      if (removalBudget > 0 && def.damageBonusTurns > 0) {
+        const amount = Math.min(removalBudget, def.damageBonusTurns);
+        def.damageBonusTurns -= amount;
+        removed += amount;
+        removalBudget -= amount;
+      }
+      if (removalBudget > 0 && def.slowEffects.length > 0) {
+        for (const purifyTarget of def.slowEffects) {
+          if (removalBudget <= 0) break;
+          const amount = Math.min(removalBudget, purifyTarget.attacksUntilRemoval);
+          purifyTarget.attacksUntilRemoval -= amount;
+          removed += amount;
+          removalBudget -= amount;
+        }
         def.slowEffects = def.slowEffects.filter(effect => effect.attacksUntilRemoval > 0);
-        removed++;
       }
-      if (def.lacerateTurns > 0) { def.lacerateTurns = Math.max(0, def.lacerateTurns - 2); removed++; }
-      if (def.poisonStacks > 0) { def.poisonStacks = Math.max(0, def.poisonStacks - 2); removed++; }
-      const heal = Math.min(removed * 2, 2) * getParam(def.data, 'purify', 'param', defReactSkill.param || 5);
+      if (removalBudget > 0 && def.lacerateTurns > 0) {
+        const amount = Math.min(removalBudget, def.lacerateTurns);
+        def.lacerateTurns -= amount;
+        removed += amount;
+        removalBudget -= amount;
+      }
+      if (removalBudget > 0 && def.poisonStacks > 0) {
+        const amount = Math.min(removalBudget, def.poisonStacks);
+        def.poisonStacks -= amount;
+        removed += amount;
+        removalBudget -= amount;
+      }
+      const heal = removed * getParam(def.data, 'purify', 'param', defReactSkill.param || 40);
       if (heal > 0) def.hp = Math.min(def.maxHP, def.hp + heal);
-      info.effects.push({ type: 'purify', removed: Math.min(removed * 2, 2), heal });
+      info.effects.push({ type: 'purify', removed, heal });
       info.purify = {
-        removed: Math.min(removed * 2, 2),
+        removed,
         heal,
         hpBefore: hpBeforePurify,
         hpAfter: def.hp,
@@ -5634,7 +5758,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
           ? { ...def.dakentrulusAttackUpScheduledEffect }
           : null,
       };
-      push('log-buff', t('purifyUse', fighterName(def), skillName(defReactSkill), Math.min(removed*2,2), heal));
+      push('log-buff', t('purifyUse', fighterName(def), skillName(defReactSkill), removed, heal));
     }
     info.rageAfter = def.defRage;
     return info;
@@ -6184,22 +6308,6 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         stateAfter: { actor: fighterState(atk), target: fighterState(def) },
       });
       return false;
-    }
-
-    // 傷口裂傷: 攻撃前に出血（前ターン適用分のみ）
-    if (def.lacerateTurns > 0) {
-      const bleedDmg = Math.round(def.maxHP * def.lacerateParam);
-      def.hp = Math.max(0, def.hp - bleedDmg);
-      consumeEntryDefenseSuppressionByDamage({
-        source: atk,
-        target: def,
-        damage: bleedDmg,
-        damageType: 'lacerate_before_attack',
-      });
-      def.lacerateTurns--;
-      push('log-debuff', t('bleedBefore', fighterName(def), bleedDmg, def.hp));
-      checkUndying(def);
-      if (def.hp <= 0) return true;
     }
 
     // ダメージ適用
@@ -7081,7 +7189,7 @@ function simulateBattle6v6(teamDataA, teamDataB, verbose = true, options = {}) {
         }
       } else if (atkSkill.effect === 'lacerate') {
         def.lacerateTurns = 3;
-        def.lacerateParam = getParam(atk.data, 'lacerate', 'param', atkSkill.param || 0.045);
+        def.lacerateParam = getParam(atk.data, 'lacerate', 'param', atkSkill.param || 0.16);
         push('log-debuff', t('lacerateEffect', fighterName(def), Math.round(def.lacerateParam*100)));
       } else if (atkSkill.effect === 'drain') {
         const healAmt = Math.round(dmg * getParam(atk.data, 'drain', 'param', atkSkill.param || 0.40));
