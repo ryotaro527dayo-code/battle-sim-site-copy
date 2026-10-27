@@ -1,1 +1,1144 @@
-fs is not defined
+const assert = require('assert');
+const { loadBattleSim, beast } = require('./harness');
+
+const app = loadBattleSim();
+
+{
+  const attacker = beast('test_counter_killer', 'Counter Killer', { agi: 200, atk: 100, dur: 100, will: 67 }, []);
+  const defender = beast('test_counter_dead', 'Counter Dead', { agi: 100, atk: 400, dur: 10, will: 66 }, [
+    { name: '防御-反撃', type: 'defense', rageCost: 0, effect: 'counter', param: 0.25 },
+  ]);
+
+  const result = app.simulateBattle6v6([attacker], [defender], true);
+  const logText = result.log.map(row => row.msg).join('\n');
+
+  assert.strictEqual(result.teamB[0].hp, 0, 'defender should be defeated by the incoming hit');
+  assert.strictEqual(result.teamA[0].hp, 300, 'reserved counter should still damage the attacker after lethal hit');
+  assert(logText.includes('反撃'), 'lethal hit should still produce a counter log');
+}
+
+{
+  const runComboDefenseCase = (roll, stats = {}) => {
+    const comboUser = beast('test_combo_pair_roll_user', 'Combo Pair Roll User', { agi: 200, atk: stats.attackerAtk || 25, dur: 2000, will: 67 }, [
+      { name: '攻撃-連撃', type: 'attack', rageCost: 0, effect: 'combo', param: 0.80 },
+    ]);
+    const counterTarget = beast('test_combo_pair_roll_target', 'Combo Pair Roll Target', { agi: 100, atk: 1, dur: stats.targetDur || 2000, will: 66 }, [
+      { name: '防御-反撃', type: 'defense', rageCost: 0, effect: 'counter', param: 0.25 },
+    ]);
+    const originalRandom = Math.random;
+    Math.random = () => roll;
+    try {
+      return app.simulateBattle6v6([comboUser], [counterTarget], true, { analysisMode: 'detail' });
+    } finally {
+      Math.random = originalRandom;
+    }
+  };
+
+  const passed = runComboDefenseCase(0.10);
+  const passedSecondHits = passed.analysisEvents.filter(event => event.eventType === 'hit' && event.skillId === 'combo' && event.hitIndex === 2 && !event.carryover);
+  assert(passedSecondHits.length >= 2, 'successful pair roll case must contain repeated combo second hits');
+  assert(passedSecondHits.every(event => event.defense.triggered), 'a passed pair roll must remain enabled for the same pair');
+  assert.strictEqual(passedSecondHits[0].defense.comboSecondHitEligibility.reused, false, 'the first second hit must roll');
+  assert(passedSecondHits.slice(1).every(event => event.defense.comboSecondHitEligibility.reused), 'later second hits must reuse the pair result');
+
+  const failed = runComboDefenseCase(0.90);
+  const failedSecondHits = failed.analysisEvents.filter(event => event.eventType === 'hit' && event.skillId === 'combo' && event.hitIndex === 2 && !event.carryover);
+  assert(failedSecondHits.length >= 2, 'failed pair roll case must contain repeated combo second hits');
+  assert(failedSecondHits.every(event => !event.defense.triggered), 'a failed pair roll must remain disabled for the same pair');
+  assert(failedSecondHits.every(event => event.defense.reason === 'combo_second_hit_pair_roll_failed'), 'failed pair roll reason must be recorded');
+
+  for (let battle = 0; battle < 1000; battle++) {
+    const roll = battle % 2 === 0 ? 0.10 : 0.90;
+    const result = runComboDefenseCase(roll, { attackerAtk: 60, targetDur: 100 });
+    const firstSecondHit = result.analysisEvents.find(event => event.eventType === 'hit' && event.skillId === 'combo' && event.hitIndex === 2 && !event.carryover);
+    assert(firstSecondHit, `battle ${battle + 1} must contain a combo second hit`);
+    assert.strictEqual(firstSecondHit.defense.triggered, roll < 0.80, `battle ${battle + 1} must perform a fresh first pair roll`);
+    assert.strictEqual(firstSecondHit.defense.comboSecondHitEligibility.reused, false, `battle ${battle + 1} first pair decision must not leak from another simulation`);
+  }
+}
+
+{
+  const comboUser = beast('test_combo_entry_battlecry_user', 'Combo Entry Battlecry User', {
+    agi: 300, atk: 100, dur: 25, will: 1,
+  }, [
+    { name: '攻撃-連撃', type: 'attack', rageCost: 0, effect: 'combo', param: 0.80 },
+  ]);
+  const replacement = beast('test_combo_entry_battlecry_replacement', 'Combo Entry Battlecry Replacement', {
+    agi: 200, atk: 500, dur: 100, will: 1,
+  }, []);
+  const firstTarget = beast('test_combo_entry_battlecry_first_target', 'Combo Entry Battlecry First Target', {
+    agi: 100, atk: 1, dur: 10, will: 1,
+  }, []);
+  const battlecryEntrant = beast('test_combo_entry_battlecry_entrant', 'Combo Entry Battlecry Entrant', {
+    agi: 100, atk: 1, dur: 100, will: 1,
+  }, [
+    { name: '戦吼-犠牲', type: 'battlecry', effect: 'sacrifice_damage', param: 0.25 },
+  ]);
+
+  const result = app.withSeededRandom(3944, () => app.simulateBattle6v6(
+    [comboUser, replacement],
+    [firstTarget, battlecryEntrant],
+    true,
+    { analysisMode: 'developer' }
+  ));
+  const entryDamageIndex = result.analysisEvents.findIndex(event =>
+    event.eventType === 'entry_damage' &&
+    event.skillId === 'sacrifice_damage' &&
+    event.target?.beastId === comboUser.id
+  );
+  const cancelledIndex = result.analysisEvents.findIndex(event =>
+    event.eventType === 'carryover_cancelled' && event.actor?.beastId === comboUser.id
+  );
+  const carriedHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'combo_carryover' &&
+    event.actor?.beastId === comboUser.id &&
+    event.target?.beastId === battlecryEntrant.id
+  );
+  const replacementEntry = result.analysisEvents.find(event =>
+    event.eventType === 'entry' && event.nextFighter?.beastId === replacement.id
+  );
+
+  assert(entryDamageIndex >= 0, 'the carryover target battlecry must resolve before the second hit');
+  assert(cancelledIndex > entryDamageIndex, 'carryover cancellation must be logged after entry battlecry damage');
+  assert.strictEqual(carriedHit, undefined, 'combo carryover damage must not occur after the attacker is defeated by entry battlecry');
+  assert.strictEqual(result.teamA[0].hp, 0, 'entry battlecry must defeat the combo attacker');
+  assert(replacementEntry, 'the defeated combo attacker must leave and its replacement must enter');
+}
+
+{
+  assert.strictEqual(app.SKILL_SEAL_BLOCKS_DEFENSE_SKILLS, true, 'skill seal must block every defense skill');
+
+  const cases = [
+    { effect: 'counter', name: '防御-反撃', param: 0.25, readyStatus: 'counterReady' },
+    { effect: 'harden', name: '防御-硬化皮膚', param: 0.35, readyStatus: 'hardenReady' },
+    { effect: 'def_dodge', name: '防御-回避', param: 0.60, readyStatus: 'defDodgeReady' },
+  ];
+
+  for (const defenseCase of cases) {
+    const weakUser = beast(`test_seal_user_${defenseCase.effect}`, `Seal User ${defenseCase.effect}`, {
+      agi: 200, atk: 10, dur: 2000, will: 67,
+    }, [
+      { name: '攻撃-虚弱', type: 'attack', rageCost: 20, effect: 'weak', param: 0.25, param2: 2 },
+    ]);
+    const sealedDefender = beast(`test_sealed_${defenseCase.effect}`, `Sealed ${defenseCase.effect}`, {
+      agi: 100, atk: 1, dur: 2000, will: 66,
+    }, [
+      { name: defenseCase.name, type: 'defense', rageCost: 30, effect: defenseCase.effect, param: defenseCase.param },
+    ]);
+
+    const result = app.withSeededRandom(777, () =>
+      app.simulateBattle6v6([weakUser], [sealedDefender], true, { analysisMode: 'developer' })
+    );
+    const targetId = sealedDefender.id;
+    const targetHits = result.analysisEvents.filter(event =>
+      event.eventType === 'hit' &&
+      event.hitType === 'main' &&
+      event.target?.beastId === targetId
+    );
+    const sealedHit = targetHits.find(event =>
+      event.stateBefore?.target?.statuses?.skillSealTurns > 0 &&
+      event.defense?.reason === 'sealed'
+    );
+
+    assert(sealedHit, `${defenseCase.effect}: sealed defense skip must be logged`);
+    assert.strictEqual(sealedHit.defense.triggered, false, `${defenseCase.effect}: sealed defense skill must not trigger`);
+    assert.strictEqual(
+      sealedHit.defense.rageAfter,
+      sealedHit.defense.rageBefore,
+      `${defenseCase.effect}: sealed defense skill must preserve defense rage`
+    );
+    assert.strictEqual(
+      sealedHit.stateAfter.target.statuses[defenseCase.readyStatus],
+      false,
+      `${defenseCase.effect}: sealed defense effect must not be reserved`
+    );
+    const sealCheck = sealedHit.defense.check.checks.find(check => check.condition === 'not_sealed');
+    assert(sealCheck && sealCheck.passed === false, `${defenseCase.effect}: defense check must record sealed`);
+
+    const postSealTrigger = targetHits.find(event =>
+      event.actionNo > sealedHit.actionNo &&
+      event.stateBefore?.target?.statuses?.skillSealTurns === 0 &&
+      event.defense?.triggered === true &&
+      event.defense?.skillId === defenseCase.effect
+    );
+    assert(postSealTrigger, `${defenseCase.effect}: defense skill must trigger at the next eligible opportunity after seal expires`);
+    assert.strictEqual(
+      postSealTrigger.defense.rageAfterConsume,
+      postSealTrigger.defense.rageBefore - 30,
+      `${defenseCase.effect}: rage must be consumed only after the seal expires`
+    );
+  }
+}
+
+{
+  const weakUser = beast('test_weak_user', 'Weak User', { agi: 200, atk: 1 }, [
+    { name: '攻撃-虚弱', type: 'attack', rageCost: 0, effect: 'weak', param: 0.25, param2: 2 },
+  ]);
+  const comboUser = beast('test_combo_user', 'Combo User', { agi: 100, atk: 1 }, [
+    { name: '攻撃-連撃', type: 'attack', rageCost: 0, effect: 'combo', param: 0.80 },
+  ]);
+
+  const result = app.simulateBattle6v6([weakUser], [comboUser], true);
+  const messages = result.log.map(row => row.msg);
+  const firstSeal = messages.findIndex(msg => msg.includes('スキル封印中'));
+
+  assert(firstSeal >= 0, 'weakness should seal the target attack skill');
+  assert(messages[firstSeal].includes('test_combo_user'), `sealed skill should apply to the weakness target: ${messages[firstSeal]}`);
+  assert(
+    messages.some(msg => msg.includes('スキル封印2行動')),
+    'weakness should apply a two-combined-action skill seal'
+  );
+}
+
+{
+  const slowUser = beast('test_slow_progress_user', 'Slow Progress User', {
+    agi: 200, atk: 1, dur: 1000, will: 1,
+  }, [
+    { name: '攻撃-減速', type: 'attack', rageCost: 0, effect: 'slow', param: 0.50 },
+  ]);
+  const slowTarget = beast('test_slow_progress_target', 'Slow Progress Target', {
+    agi: 150, atk: 1, dur: 1000, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(321, () =>
+    app.simulateBattle6v6([slowUser], [slowTarget], true, { analysisMode: 'developer' })
+  );
+  const actions = result.analysisEvents.filter(event => event.eventType === 'action_start');
+  const slowStatus = result.analysisEvents.find(event =>
+    event.eventType === 'status' &&
+    event.skillId === 'slow' &&
+    event.target?.beastId === slowTarget.id
+  );
+
+  assert.strictEqual(actions[0].actor.beastId, slowUser.id, 'faster slow user should act first');
+  assert.strictEqual(
+    actions[1].actor.beastId,
+    slowTarget.id,
+    'slow target must keep its accumulated action progress and act next'
+  );
+  assert(slowStatus, 'slow application must produce an analysis status event');
+  const progress = slowStatus.debugCalculation.status;
+  assert.strictEqual(progress.oldEffectiveAgi, 150, 'slow log must record effective AGI before application');
+  assert.strictEqual(progress.newEffectiveAgi, 150, 'attack-skill slow must not change action-gauge AGI by default');
+  assert.strictEqual(progress.agiAfter, 75, 'attack-skill slow must still change display AGI');
+  assert.strictEqual(progress.actionGauge, 750, 'slow must preserve the action gauge accumulated before application');
+  assert.strictEqual(progress.actionProgressPreserved, true, 'slow log must mark action progress as preserved');
+  assert(Math.abs(progress.oldInterval - (1000 / 150)) < 1e-12, 'slow log must record the old interval');
+  assert(Math.abs(progress.oldRemainingTime - (250 / 150)) < 1e-12, 'slow log must record old remaining time');
+  assert(Math.abs(progress.progressRatio - 0.75) < 1e-12, 'slow log must record the preserved progress ratio');
+  assert(Math.abs(progress.newInterval - (1000 / 150)) < 1e-12, 'default action-gauge interval must exclude attack-skill slow');
+  assert(Math.abs(progress.newRemainingTime - (250 / 150)) < 1e-12, 'remaining time must preserve progress at unchanged action-gauge AGI');
+}
+
+{
+  const firstAttacker = beast('test_progress_reset_first', 'Progress Reset First', {
+    agi: 200, atk: 1, dur: 10, will: 1,
+  }, []);
+  const replacement = beast('test_progress_reset_replacement', 'Progress Reset Replacement', {
+    agi: 150, atk: 1, dur: 1000, will: 1,
+  }, []);
+  const counterSurvivor = beast('test_progress_reset_survivor', 'Progress Reset Survivor', {
+    agi: 100, atk: 400, dur: 1000, will: 1,
+  }, [
+    { name: '防御-反撃', type: 'defense', rageCost: 0, effect: 'counter', param: 0.25 },
+  ]);
+
+  const result = app.withSeededRandom(654, () =>
+    app.simulateBattle6v6([firstAttacker, replacement], [counterSurvivor], true, { analysisMode: 'detail' })
+  );
+  const actions = result.analysisEvents.filter(event => event.eventType === 'action_start');
+
+  assert.strictEqual(actions[0].actor.beastId, firstAttacker.id, 'first attacker should act before the counter survivor');
+  assert.strictEqual(result.teamA[0].hp, 0, 'counter must defeat the first attacker');
+  assert.strictEqual(
+    actions[1].actor.beastId,
+    replacement.id,
+    'death and entry must reset both action gauges instead of preserving the survivor progress'
+  );
+}
+
+{
+  const slowSource = beast('test_slow_source_lifecycle', 'Slow Source Lifecycle', {
+    agi: 200, atk: 1, dur: 1000, will: 67,
+  }, [
+    { name: '攻撃-減速', type: 'attack', rageCost: 40, effect: 'slow', param: 0.50 },
+  ]);
+  const slowTarget = beast('test_slow_target_lifecycle', 'Slow Target Lifecycle', {
+    agi: 150, atk: 1, dur: 1000, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(2468, () =>
+    app.simulateBattle6v6([slowSource], [slowTarget], true, { analysisMode: 'developer' })
+  );
+  const slowApplied = result.analysisEvents.find(event =>
+    event.eventType === 'status' &&
+    event.skillId === 'slow' &&
+    event.target?.beastId === slowTarget.id
+  );
+
+  assert(slowApplied, 'slow lifecycle test must apply slow');
+  const sourceInstanceId = slowApplied.debugCalculation.status.slowSourceInstanceId;
+  const targetInstanceId = slowApplied.debugCalculation.status.slowTargetInstanceId;
+  assert.strictEqual(sourceInstanceId, slowApplied.actor.instanceId, 'slow must store the source instance ID');
+  assert.strictEqual(targetInstanceId, slowApplied.target.instanceId, 'slow must store the target instance ID');
+  assert.deepStrictEqual(slowApplied.debugCalculation.status.attacksUntilRemovalAfter, [2], 'new slow must start at two matching attacks');
+
+  const targetOwnAction = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.actionNo > slowApplied.actionNo &&
+    event.actor?.instanceId === targetInstanceId &&
+    event.stateBefore?.actor?.statuses?.slowEffects?.some(effect => effect.attacksUntilRemoval === 2)
+  );
+  assert(targetOwnAction, 'slowed target must receive an action while slow has two attacks remaining');
+  assert.deepStrictEqual(
+    targetOwnAction.stateAfter.actor.statuses.slowEffects.map(effect => effect.attacksUntilRemoval),
+    [2],
+    'slowed target own action must not decrement slow'
+  );
+  assert.strictEqual(
+    targetOwnAction.debugCalculation.slowDecrement.decrementReason,
+    'slowed_target_own_action_does_not_decrement',
+    'slowed target own action must log why the slow count was preserved'
+  );
+
+  const matchingSourceHits = result.analysisEvents.filter(event =>
+    event.eventType === 'hit' &&
+    event.actionNo > slowApplied.actionNo &&
+    event.actor?.instanceId === sourceInstanceId &&
+    event.target?.instanceId === targetInstanceId &&
+    event.debugCalculation?.slowDecrement?.decrementTriggered
+  );
+  assert(matchingSourceHits.length >= 2, 'slow source must attack the slow target twice after application');
+  assert.deepStrictEqual(
+    [
+      matchingSourceHits[0].debugCalculation.slowDecrement.attacksUntilRemovalBefore,
+      matchingSourceHits[0].debugCalculation.slowDecrement.attacksUntilRemovalAfter,
+    ],
+    [[2], [1]],
+    'first matching source attack must decrement slow from two to one'
+  );
+  assert.deepStrictEqual(
+    [
+      matchingSourceHits[1].debugCalculation.slowDecrement.attacksUntilRemovalBefore,
+      matchingSourceHits[1].debugCalculation.slowDecrement.attacksUntilRemovalAfter,
+    ],
+    [[1], [0]],
+    'second matching source attack must decrement slow from one to zero'
+  );
+  assert.deepStrictEqual(
+    matchingSourceHits[1].stateAfter.target.statuses.slowEffects,
+    [],
+    'slow must be removed only when the matching attack count reaches zero'
+  );
+}
+
+{
+  const repeatedSlowSource = beast('test_repeated_slow_source', 'Repeated Slow Source', {
+    agi: 200, atk: 1, dur: 1000, will: 1,
+  }, [
+    { name: '攻撃-減速', type: 'attack', rageCost: 0, effect: 'slow', param: 0.10 },
+  ]);
+  const sealingTarget = beast('test_repeated_slow_target', 'Repeated Slow Target', {
+    agi: 100, atk: 1, dur: 1000, will: 1,
+  }, [
+    { name: '攻撃-虚弱', type: 'attack', rageCost: 0, effect: 'weak', param: 0.25, param2: 2 },
+  ]);
+
+  const result = app.withSeededRandom(9753, () =>
+    app.simulateBattle6v6(
+      [repeatedSlowSource],
+      [sealingTarget],
+      true,
+      { analysisMode: 'developer', attackSkillSpeedAffectsActionGauge: true }
+    )
+  );
+  const slowApplications = result.analysisEvents.filter(event =>
+    event.eventType === 'status' &&
+    event.skillId === 'slow' &&
+    event.actor?.beastId === repeatedSlowSource.id
+  );
+  assert(slowApplications.length >= 2, 'source must apply two consecutive independent slow effects');
+  assert.deepStrictEqual(
+    slowApplications[0].stateAfter.target.statuses.slowEffects.map(effect => effect.attacksUntilRemoval),
+    [2],
+    'first slow attack must create one effect with count two'
+  );
+  assert.deepStrictEqual(
+    slowApplications[1].stateAfter.target.statuses.slowEffects.map(effect => effect.attacksUntilRemoval),
+    [1, 2],
+    'second slow attack must decrement the old effect and append a new count-two effect'
+  );
+  assert.notStrictEqual(
+    slowApplications[1].stateAfter.target.statuses.slowEffects[0].id,
+    slowApplications[1].stateAfter.target.statuses.slowEffects[1].id,
+    'overlapping slow effects must have independent IDs'
+  );
+
+  const postSecondApplicationHits = result.analysisEvents.filter(event =>
+    event.eventType === 'hit' &&
+    event.actionNo > slowApplications[1].actionNo &&
+    event.actor?.beastId === repeatedSlowSource.id &&
+    event.target?.beastId === sealingTarget.id &&
+    event.debugCalculation?.slowDecrement?.decrementTriggered
+  );
+  assert(postSecondApplicationHits.length >= 2, 'sealed source must make two normal attacks after the second slow');
+  assert.deepStrictEqual(
+    postSecondApplicationHits[0].debugCalculation.slowDecrement.attacksUntilRemovalBefore,
+    [1, 2],
+    'first normal attack must see both independent slow effects'
+  );
+  assert.deepStrictEqual(
+    postSecondApplicationHits[0].debugCalculation.slowDecrement.attacksUntilRemovalAfter,
+    [0, 1],
+    'first normal attack must decrement both matching effects independently'
+  );
+  assert.deepStrictEqual(
+    postSecondApplicationHits[0].stateAfter.target.statuses.slowEffects.map(effect => effect.attacksUntilRemoval),
+    [1],
+    'only the zero-count effect must be removed'
+  );
+  assert.deepStrictEqual(
+    postSecondApplicationHits[1].debugCalculation.slowDecrement.attacksUntilRemovalBefore,
+    [1],
+    'second normal attack must retain the remaining effect'
+  );
+  assert.deepStrictEqual(
+    postSecondApplicationHits[1].debugCalculation.slowDecrement.attacksUntilRemovalAfter,
+    [0],
+    'second normal attack must expire the final effect'
+  );
+  assert.deepStrictEqual(
+    postSecondApplicationHits[1].stateAfter.target.statuses.slowEffects,
+    [],
+    'all slow effects must be gone after their own counters reach zero'
+  );
+}
+
+{
+  const fighter = new app.Fighter(
+    beast('test_slow_agi_sum', 'Slow AGI Sum', { agi: 200, atk: 1, dur: 1000, will: 1 }, []),
+    'B-test'
+  );
+  fighter.slowEffects = [
+    { id: 'slow-a', sourceInstanceId: 'A-0', targetInstanceId: 'B-test', attacksUntilRemoval: 1, agiDown: 50 },
+    { id: 'slow-b', sourceInstanceId: 'A-0', targetInstanceId: 'B-test', attacksUntilRemoval: 2, agiDown: 50 },
+  ];
+  assert.strictEqual(fighter.getDisplayAGI(), 100, 'two active 50-point slow effects must reduce display AGI by 100');
+  fighter.slowEffects = fighter.slowEffects.filter(effect => effect.id !== 'slow-a');
+  assert.strictEqual(fighter.getDisplayAGI(), 150, 'removing one effect must restore only its own 50 display AGI');
+  fighter.slowEffects = [];
+  assert.strictEqual(fighter.getDisplayAGI(), 200, 'removing all effects must restore original display AGI');
+}
+
+{
+  assert.strictEqual(
+    app.ATTACK_SKILL_SPEED_AFFECTS_ACTION_GAUGE,
+    false,
+    'attack-skill speed must not affect the action gauge by default'
+  );
+
+  const slowSource = beast('test_speed_mode_source', 'Speed Mode Source', {
+    agi: 180, atk: 1, dur: 1000, will: 1,
+  }, [
+    { name: '攻撃-減速', type: 'attack', rageCost: 0, effect: 'slow', param: 0.50 },
+  ]);
+  const slowTarget = beast('test_speed_mode_target', 'Speed Mode Target', {
+    agi: 100, atk: 1, dur: 1000, will: 1,
+  }, []);
+
+  const run = attackSkillSpeedAffectsActionGauge => app.withSeededRandom(1122, () =>
+    app.simulateBattle6v6(
+      [slowSource],
+      [slowTarget],
+      true,
+      { analysisMode: 'developer', attackSkillSpeedAffectsActionGauge }
+    )
+  );
+  const gaugeOn = run(true);
+  const gaugeOff = run(false);
+  const gaugeDefault = run();
+  const onActions = gaugeOn.analysisEvents.filter(event => event.eventType === 'action_start');
+  const offActions = gaugeOff.analysisEvents.filter(event => event.eventType === 'action_start');
+  const defaultActions = gaugeDefault.analysisEvents.filter(event => event.eventType === 'action_start');
+  const onSlow = gaugeOn.analysisEvents.find(event => event.eventType === 'status' && event.skillId === 'slow');
+  const offSlow = gaugeOff.analysisEvents.find(event => event.eventType === 'status' && event.skillId === 'slow');
+  const defaultSlow = gaugeDefault.analysisEvents.find(event => event.eventType === 'status' && event.skillId === 'slow');
+
+  assert.strictEqual(onSlow.stateAfter.target.agi, 50, 'gauge ON must apply slow to display AGI');
+  assert.strictEqual(offSlow.stateAfter.target.agi, 50, 'gauge OFF must still apply slow to display AGI');
+  assert.strictEqual(defaultSlow.stateAfter.target.agi, 50, 'default mode must apply slow to display AGI');
+  assert.strictEqual(onSlow.debugCalculation.status.actionGaugeAgiAfter, 50, 'gauge ON must use slowed AGI for action timing');
+  assert.strictEqual(offSlow.debugCalculation.status.actionGaugeAgiAfter, 100, 'gauge OFF must exclude attack-skill slow from action timing');
+  assert.strictEqual(defaultSlow.debugCalculation.status.actionGaugeAgiAfter, 100, 'default action timing must exclude attack-skill slow');
+  assert.strictEqual(onActions[1].actor.beastId, slowSource.id, 'gauge ON must delay the slowed target');
+  assert.strictEqual(offActions[1].actor.beastId, slowTarget.id, 'gauge OFF must preserve the target action-gauge speed');
+  assert.strictEqual(defaultActions[1].actor.beastId, slowTarget.id, 'default mode must preserve the target action-gauge speed');
+  assert.strictEqual(
+    gaugeOff.actionGaugeSpeedModifierEnabled[app.SpeedModifierType.ATTACK_SKILL],
+    false,
+    'result must expose the action-gauge speed policy used for the battle'
+  );
+
+  const rapidFighter = new app.Fighter(
+    beast('test_warcry_speed_mode', 'Warcry Speed Mode', { agi: 100, atk: 1, dur: 1000, will: 1 }, [
+      { name: '戦吼-急速', type: 'battlecry', effect: 'rapid', param: 0.12, param2: 0.08 },
+    ]),
+    'A-rapid',
+    { [app.SpeedModifierType.ATTACK_SKILL]: false }
+  );
+  assert.strictEqual(rapidFighter.getDisplayAGI(), 112, 'warcry speed must affect display AGI');
+  assert.strictEqual(rapidFighter.getActionGaugeAGI(), 112, 'warcry speed must always affect action-gauge AGI');
+
+  const makeTypedModifierFighter = actionGaugeSpeedModifierEnabled => {
+    const fighter = new app.Fighter(
+      beast('test_typed_speed_modifiers', 'Typed Speed Modifiers', { agi: 100, atk: 1, dur: 1000, will: 1 }, []),
+      'A-typed',
+      actionGaugeSpeedModifierEnabled
+    );
+    fighter.addSpeedModifier({
+      id: 'passive-speed',
+      type: app.SpeedModifierType.PASSIVE,
+      operation: 'multiply',
+      value: 1.20,
+    });
+    fighter.addSpeedModifier({
+      id: 'equipment-speed',
+      type: app.SpeedModifierType.EQUIPMENT,
+      operation: 'subtract',
+      value: 10,
+    });
+    fighter.poisonStacks = 5;
+    return fighter;
+  };
+  const typedDefault = makeTypedModifierFighter({});
+  assert.strictEqual(typedDefault.getDisplayAGI(), 105, 'display AGI must include passive, equipment, and status modifiers');
+  assert.strictEqual(typedDefault.getActionGaugeAGI(), 100, 'passive, equipment, and status must be disabled for action gauge by default');
+
+  const typedEnabled = makeTypedModifierFighter({
+    [app.SpeedModifierType.PASSIVE]: true,
+    [app.SpeedModifierType.EQUIPMENT]: true,
+    [app.SpeedModifierType.STATUS]: true,
+  });
+  assert.strictEqual(
+    typedEnabled.getActionGaugeAGI(),
+    105,
+    'actionGaugeSpeedModifierEnabled must enable passive, equipment, and status modifiers by type'
+  );
+}
+
+{
+  const doomedSlowSource = beast('test_doomed_slow_source', 'Doomed Slow Source', {
+    agi: 301, atk: 1, dur: 25, will: 67,
+  }, [
+    { name: '攻撃-減速', type: 'attack', rageCost: 40, effect: 'slow', param: 0.50 },
+  ]);
+  const replacement = beast('test_slow_source_replacement', 'Slow Source Replacement', {
+    agi: 250, atk: 1, dur: 1000, will: 1,
+  }, []);
+  const persistentSlowTarget = beast('test_persistent_slow_target', 'Persistent Slow Target', {
+    agi: 100, atk: 500, dur: 5000, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(1357, () =>
+    app.simulateBattle6v6(
+      [doomedSlowSource, replacement],
+      [persistentSlowTarget],
+      true,
+      { analysisMode: 'developer' }
+    )
+  );
+  const slowApplied = result.analysisEvents.find(event =>
+    event.eventType === 'status' &&
+    event.skillId === 'slow' &&
+    event.actor?.beastId === doomedSlowSource.id
+  );
+  assert(slowApplied, 'doomed source must apply slow before being defeated');
+
+  const sourceInstanceId = slowApplied.actor.instanceId;
+  const targetInstanceId = slowApplied.target.instanceId;
+  const sourceDefeat = result.analysisEvents.find(event =>
+    event.eventType === 'defeat' &&
+    event.defeated?.instanceId === sourceInstanceId
+  );
+  assert(sourceDefeat, 'slow source must be defeated after applying slow');
+
+  const replacementHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.actionNo > sourceDefeat.actionNo &&
+    event.actor?.beastId === replacement.id &&
+    event.target?.instanceId === targetInstanceId
+  );
+  assert(replacementHit, 'replacement must attack the persistent slow target');
+  assert.strictEqual(
+    replacementHit.debugCalculation.slowDecrement.decrementTriggered,
+    false,
+    'replacement attack must not decrement slow applied by the defeated source'
+  );
+  assert.strictEqual(
+    replacementHit.debugCalculation.slowDecrement.decrementReason,
+    'attacker_not_slow_source',
+    'replacement mismatch must be explicit in the debug log'
+  );
+  assert.strictEqual(
+    replacementHit.debugCalculation.slowDecrement.attacksUntilRemovalBefore[0],
+    2,
+    'slow must remain at two after its source is defeated'
+  );
+  assert.strictEqual(
+    replacementHit.debugCalculation.slowDecrement.attacksUntilRemovalAfter[0],
+    2,
+    'replacement attack must leave persistent slow unchanged'
+  );
+  assert.strictEqual(
+    replacementHit.stateAfter.target.statuses.slowEffects[0].attacksUntilRemoval,
+    2,
+    'slow must remain on the target after a different instance attacks'
+  );
+}
+
+{
+  const active = beast('test_entry_effective_agi_active', 'Entry Effective AGI Active', {
+    agi: 120, atk: 500, dur: 1000, will: 1,
+  }, []);
+  const defeated = beast('test_entry_effective_agi_defeated', 'Entry Effective AGI Defeated', {
+    agi: 50, atk: 1, dur: 1, will: 1,
+  }, []);
+  const rapidReplacement = beast('test_entry_effective_agi_rapid', 'Entry Effective AGI Rapid', {
+    agi: 110, atk: 1, dur: 1000, will: 1,
+  }, [
+    { name: '戦吼-急速', type: 'battlecry', effect: 'rapid', param: 0.12, param2: 0.08 },
+  ]);
+
+  const result = app.withSeededRandom(987, () =>
+    app.simulateBattle6v6([active], [defeated, rapidReplacement], true, { analysisMode: 'detail' })
+  );
+  const actions = result.analysisEvents.filter(event => event.eventType === 'action_start');
+
+  assert.strictEqual(actions[0].actor.beastId, active.id, 'active fighter should defeat the first opponent');
+  assert.strictEqual(rapidReplacement.agi, 110, 'test input should retain its base AGI');
+  assert.strictEqual(
+    actions[1].actor.beastId,
+    rapidReplacement.id,
+    'post-entry order must use effective AGI including rapid'
+  );
+  assert.strictEqual(actions[1].order.effectiveAgiB, 123, 'rapid replacement effective AGI must include the 12% speed bonus');
+  assert.strictEqual(actions[1].order.effectiveAgiA, 120, 'remaining fighter effective AGI must be recalculated after entry');
+}
+
+{
+  const survivor = beast('test_entry_plain_survivor', 'Entry Plain Survivor', {
+    agi: 100, atk: 500, dur: 2000, will: 1,
+  }, [
+    { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+  ]);
+  const defeated = beast('test_entry_plain_defeated', 'Entry Plain Defeated', {
+    agi: 50, atk: 1, dur: 1, will: 1,
+  }, []);
+  const kong = beast('test_entry_plain_kong', 'Entry Plain Kong', {
+    agi: 200, atk: 100, dur: 1000, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(1101, () =>
+    app.simulateBattle6v6([survivor], [defeated, kong], true, { analysisMode: 'developer' })
+  );
+  const firstKongHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'main' &&
+    event.actor?.beastId === kong.id &&
+    event.target?.beastId === survivor.id
+  );
+
+  assert(firstKongHit, 'plain entrant must produce a first normal hit');
+  assert.strictEqual(firstKongHit.attackType, 'normal', 'plain entrant first action must be a normal attack');
+  assert.strictEqual(firstKongHit.defense.triggered, false, 'survivor defense must be suppressed on the first damage after entry');
+  assert.strictEqual(
+    firstKongHit.defense.reason,
+    'entry_first_damage_defense_suppressed',
+    'plain entry suppression must identify the first damage event'
+  );
+}
+
+{
+  const survivor = beast('test_entry_sacrifice_survivor', 'Entry Sacrifice Survivor', {
+    agi: 100, atk: 500, dur: 2000, will: 1,
+  }, [
+    { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+  ]);
+  const defeated = beast('test_entry_sacrifice_defeated', 'Entry Sacrifice Defeated', {
+    agi: 50, atk: 1, dur: 1, will: 1,
+  }, []);
+  const tiger = beast('test_entry_sacrifice_tiger', 'Entry Sacrifice Tiger', {
+    agi: 200, atk: 100, dur: 1000, will: 1,
+  }, [
+    { name: '戦吼-奉納', type: 'battlecry', effect: 'sacrifice', param: 0.10, param2: 0.225 },
+  ]);
+
+  const result = app.withSeededRandom(1102, () =>
+    app.simulateBattle6v6([survivor], [defeated, tiger], true, { analysisMode: 'developer' })
+  );
+  const entryDamage = result.analysisEvents.find(event =>
+    event.eventType === 'entry_damage' &&
+    event.actor?.beastId === tiger.id &&
+    event.hitType === 'entry_sacrifice_self_damage'
+  );
+  const firstTigerAction = result.analysisEvents.find(event =>
+    event.eventType === 'action_start' && event.actor?.beastId === tiger.id
+  );
+  const firstTigerHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'main' &&
+    event.actor?.beastId === tiger.id &&
+    event.target?.beastId === survivor.id
+  );
+
+  assert(entryDamage, 'sacrifice entry must record its self-damage as a non-action damage event');
+  assert.strictEqual(entryDamage.nonAction, true, 'sacrifice entry damage must not count as an action');
+  assert.strictEqual(entryDamage.damage.displayed, 400, 'sacrifice must deal ten percent max HP to the entrant');
+  assert.strictEqual(
+    entryDamage.damage.entryDefenseSuppressionConsumed.damageType,
+    'entry_sacrifice_self_damage',
+    'sacrifice self-damage must consume the first-damage defense suppression'
+  );
+  assert.strictEqual(entryDamage.damage.entryDefenseSuppressionConsumed.actionProgressAffected, false);
+  assert.strictEqual(entryDamage.damage.entryDefenseSuppressionConsumed.attackCountAffected, false);
+  assert.strictEqual(entryDamage.damage.entryDefenseSuppressionConsumed.attackRageAffected, false);
+  assert(firstTigerAction.actionNo > entryDamage.actionNo, 'entry self-damage must not allocate a new action number');
+  assert.strictEqual(firstTigerHit.attackType, 'normal', 'entrant first action must remain a normal attack');
+  assert.strictEqual(firstTigerHit.defense.triggered, true, 'survivor defense must be available after sacrifice consumed the first damage');
+  assert.strictEqual(firstTigerHit.defense.skillId, 'harden', 'harden must trigger on the post-sacrifice normal attack');
+}
+
+{
+  const survivor = beast('test_entry_rapid_survivor', 'Entry Rapid Survivor', {
+    agi: 100, atk: 500, dur: 2000, will: 1,
+  }, [
+    { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+  ]);
+  const defeated = beast('test_entry_rapid_defeated', 'Entry Rapid Defeated', {
+    agi: 50, atk: 1, dur: 1, will: 1,
+  }, []);
+  const rapidEntrant = beast('test_entry_rapid_entrant', 'Entry Rapid Entrant', {
+    agi: 100, atk: 100, dur: 1000, will: 1,
+  }, [
+    { name: '戦吼-急速', type: 'battlecry', effect: 'rapid', param: 0.12, param2: 0.08 },
+  ]);
+
+  const result = app.withSeededRandom(1103, () =>
+    app.simulateBattle6v6([survivor], [defeated, rapidEntrant], true, { analysisMode: 'developer' })
+  );
+  const firstEntrantAction = result.analysisEvents.find(event =>
+    event.eventType === 'action_start' && event.actor?.beastId === rapidEntrant.id
+  );
+  const firstEntrantHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'main' &&
+    event.actor?.beastId === rapidEntrant.id &&
+    event.target?.beastId === survivor.id
+  );
+  const entryDamage = result.analysisEvents.find(event =>
+    event.eventType === 'entry_damage' && event.actor?.beastId === rapidEntrant.id
+  );
+
+  assert.strictEqual(entryDamage, undefined, 'non-damaging rapid must not create or consume an entry damage event');
+  assert.strictEqual(firstEntrantAction.order.effectiveAgiB, 112, 'rapid must affect post-entry action order');
+  assert.strictEqual(firstEntrantHit.defense.triggered, false, 'rapid must leave first-damage defense suppression armed');
+  assert.strictEqual(firstEntrantHit.defense.reason, 'entry_first_damage_defense_suppressed');
+}
+
+{
+  const originalApplyBattleCry = app.Fighter.prototype.applyBattleCry;
+  app.Fighter.prototype.applyBattleCry = function applyBattleCryWithEntryRage() {
+    originalApplyBattleCry.call(this);
+    if (this.data.id === 'test_entry_rage_entrant') this.atkRage = 50;
+  };
+  try {
+    const survivor = beast('test_entry_rage_survivor', 'Entry Rage Survivor', {
+      agi: 100, atk: 500, dur: 2000, will: 1,
+    }, [
+      { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+    ]);
+    const defeated = beast('test_entry_rage_defeated', 'Entry Rage Defeated', {
+      agi: 50, atk: 1, dur: 1, will: 1,
+    }, []);
+    const rageEntrant = beast('test_entry_rage_entrant', 'Entry Rage Entrant', {
+      agi: 200, atk: 100, dur: 1000, will: 1,
+    }, [
+      { name: '攻撃-大地震撼', type: 'attack', rageCost: 50, effect: 'quake', param: 1.50, param2: 0.20 },
+    ]);
+
+    const result = app.withSeededRandom(1104, () =>
+      app.simulateBattle6v6([survivor], [defeated, rageEntrant], true, { analysisMode: 'developer' })
+    );
+    const entrantHits = result.analysisEvents.filter(event =>
+      event.eventType === 'hit' &&
+      event.hitType === 'main' &&
+      event.actor?.beastId === rageEntrant.id
+    );
+
+    assert.strictEqual(entrantHits[0].attackType, 'normal', 'entry rage must not bypass first-action attack skill suppression');
+    assert.strictEqual(entrantHits[0].attackSkill.reason, 'entry_suppression');
+    assert.strictEqual(entrantHits[0].defense.reason, 'entry_first_damage_defense_suppressed');
+    assert.strictEqual(entrantHits[1].attackType, 'skill', 'attack skill must become available after the first entrant action');
+    assert.strictEqual(entrantHits[1].skillId, 'quake');
+    assert.strictEqual(entrantHits[1].defense.triggered, true, 'first-damage defense suppression must be consumed independently');
+  } finally {
+    app.Fighter.prototype.applyBattleCry = originalApplyBattleCry;
+  }
+}
+
+{
+  const runComboCase = (id, ratio, firstTargetDur, includeBench = false) => {
+    const attacker = beast(`test_combo_multiplier_attacker_${id}`, `Combo Multiplier Attacker ${id}`, {
+      agi: 200, atk: 100, dur: 1000, will: 1,
+    }, [
+      { name: '攻撃-連撃', type: 'attack', rageCost: 0, effect: 'combo', param: ratio },
+    ]);
+    const firstTarget = beast(`test_combo_multiplier_target_${id}`, `Combo Multiplier Target ${id}`, {
+      agi: 100, atk: 1, dur: firstTargetDur, will: 1,
+    }, []);
+    const defenders = [firstTarget];
+    if (includeBench) {
+      defenders.push(beast(`test_combo_multiplier_bench_${id}`, `Combo Multiplier Bench ${id}`, {
+        agi: 100, atk: 1, dur: 1000, will: 1,
+      }, []));
+    }
+    const result = app.withSeededRandom(1301, () =>
+      app.simulateBattle6v6([attacker], defenders, true, { analysisMode: 'developer' })
+    );
+    return result.analysisEvents.find(event =>
+      event.eventType === 'hit' &&
+      event.hitIndex === 2 &&
+      event.actor?.beastId === attacker.id
+    );
+  };
+
+  const normalSecondHit = runComboCase('normal', 0.80, 1000);
+  const levelSpecificSecondHit = runComboCase('level_specific', 0.70, 1000);
+  const carryoverSecondHit = runComboCase('carryover', 0.80, 1, true);
+
+  for (const [event, baseRatio] of [
+    [normalSecondHit, 0.80],
+    [levelSpecificSecondHit, 0.70],
+    [carryoverSecondHit, 0.80],
+  ]) {
+    assert(event, 'combo second hit must be recorded');
+    assert.strictEqual(event.damage.ratio, baseRatio, 'configured combo ratio must remain unchanged');
+    assert.strictEqual(event.damage.secondHitMultiplier, 1.05, 'combo second hit must expose its separate 1.05 multiplier');
+    assert.strictEqual(event.damage.appliedRatio, baseRatio * 1.05, 'applied ratio must derive from the configured ratio');
+    assert.strictEqual(
+      event.damage.displayed,
+      Math.round(event.damage.baseATK * baseRatio * 1.05 * event.damage.variance * event.damage.defenderDamageMultiplier),
+      'combo second-hit damage must apply the extra multiplier exactly once'
+    );
+    assert.strictEqual(
+      event.debugCalculation.damage.steps.filter(step => step.label === 'combo_second_hit_multiplier').length,
+      1,
+      'combo second-hit debug calculation must contain exactly one 1.05 step'
+    );
+    assert.strictEqual(
+      event.debugCalculation.damage.skillCalculation.configuredRatio,
+      baseRatio,
+      'skill calculation must preserve the level-specific base ratio'
+    );
+  }
+  assert(Math.abs(normalSecondHit.damage.appliedRatio - 0.84) < 1e-12, '80% combo ratio must become 84% only after applying 1.05');
+  assert(Math.abs(levelSpecificSecondHit.damage.appliedRatio - 0.735) < 1e-12, '70% combo ratio must not be replaced by a fixed 84%');
+  assert.strictEqual(carryoverSecondHit.hitType, 'combo_carryover', 'carryover second hit must use the same additional multiplier');
+}
+
+{
+  const runQuakeBenchCase = (id, hardenParam = null) => {
+    const attacker = beast(`test_quake_bench_attacker_${id}`, `Quake Bench Attacker ${id}`, {
+      agi: 200, atk: 100, dur: 1000, will: 1,
+    }, [
+      { name: '攻撃-大地震撼', type: 'attack', rageCost: 0, effect: 'quake', param: 1.50, param2: 0.20 },
+    ]);
+    const mainSkills = hardenParam == null ? [] : [
+      { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: hardenParam },
+    ];
+    const mainTarget = beast(`test_quake_bench_main_${id}`, `Quake Bench Main ${id}`, {
+      agi: 100, atk: 1, dur: 1000, will: 1,
+    }, mainSkills);
+    const benchTarget = beast(`test_quake_bench_reserve_${id}`, `Quake Bench Reserve ${id}`, {
+      agi: 100, atk: 1, dur: 1000, will: 1,
+    }, []);
+    const result = app.withSeededRandom(1302, () =>
+      app.simulateBattle6v6([attacker], [mainTarget, benchTarget], true, { analysisMode: 'developer' })
+    );
+    return result.analysisEvents.find(event =>
+      event.eventType === 'hit' &&
+      event.hitType === 'quake_bench' &&
+      event.target?.beastId === benchTarget.id
+    );
+  };
+
+  const hardenedBenchHit = runQuakeBenchCase('hardened', 0.30);
+  const plainBenchHit = runQuakeBenchCase('plain');
+
+  assert.strictEqual(hardenedBenchHit.damage.hardenReduction, 0.30, 'bench damage must use the main target harden skill value');
+  assert.strictEqual(hardenedBenchHit.damage.defenderDamageMultiplier, 0.70);
+  assert.strictEqual(
+    hardenedBenchHit.damage.displayed,
+    Math.round(hardenedBenchHit.damage.baseATK * 0.20 * hardenedBenchHit.damage.variance * 0.70),
+    'quake bench damage must inherit main-target harden exactly once'
+  );
+  assert.strictEqual(
+    hardenedBenchHit.debugCalculation.damage.steps.filter(step => step.label === 'inherited_main_harden_multiplier').length,
+    1,
+    'quake bench debug calculation must contain one inherited harden step'
+  );
+  assert.strictEqual(plainBenchHit.damage.inheritedMainTargetHarden, false);
+  assert.strictEqual(plainBenchHit.damage.defenderDamageMultiplier, 1);
+  assert.strictEqual(
+    plainBenchHit.damage.displayed,
+    Math.round(plainBenchHit.damage.baseATK * 0.20 * plainBenchHit.damage.variance),
+    'quake bench damage must remain unchanged when main harden did not trigger'
+  );
+}
+
+{
+  const runDamageCase = (id, skills, defenderSkills = []) => {
+    const attacker = beast(`test_damage_scope_attacker_${id}`, `Damage Scope Attacker ${id}`, {
+      agi: 200, atk: 100, dur: 1000, will: 1,
+    }, skills);
+    const defender = beast(`test_damage_scope_defender_${id}`, `Damage Scope Defender ${id}`, {
+      agi: 100, atk: 1, dur: 1000, will: 1,
+    }, defenderSkills);
+    const result = app.withSeededRandom(1201, () =>
+      app.simulateBattle6v6([attacker], [defender], true, { analysisMode: 'developer' })
+    );
+    return result.analysisEvents.find(event =>
+      event.eventType === 'hit' &&
+      event.hitType === 'main' &&
+      event.actor?.beastId === attacker.id
+    );
+  };
+
+  const normalHit = runDamageCase('normal', []);
+  const quakeHit = runDamageCase('quake', [
+    { name: '攻撃-大地震撼', type: 'attack', rageCost: 0, effect: 'quake', param: 1.50, param2: 0 },
+  ]);
+  const fullPowerLv4Hit = runDamageCase('full_power_lv4', [
+    { name: '攻撃-全力一撃', type: 'attack', rageCost: 0, effect: 'full_power', param: 2.40 },
+  ]);
+  const fullPowerLv2Hit = runDamageCase('full_power_lv2', [
+    { name: '攻撃-全力一撃', type: 'attack', rageCost: 0, effect: 'full_power', param: 2.10 },
+  ]);
+  const hardenedFullPowerHit = runDamageCase('full_power_hardened', [
+    { name: '攻撃-全力一撃', type: 'attack', rageCost: 0, effect: 'full_power', param: 2.40 },
+  ], [
+    { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+  ]);
+  const buffedFullPowerHit = runDamageCase('full_power_buffed', [
+    { name: '攻撃-全力一撃', type: 'attack', rageCost: 0, effect: 'full_power', param: 2.40 },
+    { name: '戦吼-奉納', type: 'battlecry', effect: 'sacrifice', param: 0.10, param2: 0.225 },
+  ]);
+  const flameTailPtera = app.CHARS.flame_tail_ptera;
+  assert(flameTailPtera, 'Flametail Ptera must exist in the registered beast definitions');
+  const flameTailFullPower = flameTailPtera.skills.find(skill => skill.effect === 'full_power');
+  const flameTailSacrifice = flameTailPtera.skills.find(skill => skill.effect === 'sacrifice');
+  assert(flameTailFullPower, 'Flametail Ptera must have full power');
+  assert(flameTailSacrifice, 'Flametail Ptera must have sacrifice');
+  const flameTailFullPowerHit = runDamageCase('flame_tail_ptera_full_power', [
+    { ...flameTailFullPower, rageCost: 0 },
+    { ...flameTailSacrifice },
+  ]);
+
+  const variance = fullPowerLv4Hit.damage.variance;
+  assert.strictEqual(
+    fullPowerLv4Hit.damage.displayed,
+    Math.round(100 * 2.40 * 0.9 * variance),
+    'Lv4 full power must use the 240% display ratio and apply only its hidden 0.9 modifier'
+  );
+  assert.strictEqual(
+    fullPowerLv2Hit.damage.displayed,
+    Math.round(100 * 2.10 * 0.9 * variance),
+    'Lv2 full power must retain 210% display ratio and apply only its hidden 0.9 modifier'
+  );
+  assert.strictEqual(fullPowerLv4Hit.debugCalculation.damage.skillCalculation.configuredRatio, 2.40);
+  assert.strictEqual(fullPowerLv2Hit.debugCalculation.damage.skillCalculation.configuredRatio, 2.10);
+  assert.strictEqual(fullPowerLv4Hit.debugCalculation.damage.skillCalculation.hiddenDamageMultiplier, 0.9);
+  assert(
+    fullPowerLv4Hit.debugCalculation.damage.steps.some(step =>
+      step.label === 'full_power_hidden_multiplier' && step.multiplier === 0.9
+    ),
+    'full power debug steps must expose the skill-only hidden multiplier'
+  );
+  for (const hit of [fullPowerLv4Hit, fullPowerLv2Hit, hardenedFullPowerHit, buffedFullPowerHit, flameTailFullPowerHit]) {
+    const calculation = hit.debugCalculation.damage.fullPowerCalculation;
+    assert(calculation, 'every full-power hit must expose its dedicated calculation values');
+    assert.strictEqual(calculation.fullPowerHiddenMultiplier, 0.9);
+    assert.strictEqual(calculation.hiddenMultiplierApplicationCount, 1, 'hidden 0.9 must be applied exactly once');
+    assert(calculation.randomMultiplier >= 0.95 && calculation.randomMultiplier <= 1.05);
+    assert.strictEqual(calculation.randomMultiplier, hit.damage.variance, 'logged random multiplier must be the damage multiplier actually used');
+    assert.strictEqual(
+      calculation.randomMultiplier,
+      hit.debugCalculation.damage.rng.convertedValue,
+      'full power calculation and RNG event must reference the same converted random value'
+    );
+    assert(
+      Math.abs(
+        calculation.damageBeforeReduction -
+        calculation.baseAttack *
+        calculation.attackBuffMultiplier *
+        calculation.skillMultiplier *
+        calculation.fullPowerHiddenMultiplier *
+        calculation.randomMultiplier
+      ) < 1e-10,
+      'logged pre-reduction damage must match the displayed full-power factors'
+    );
+    assert(
+      Math.abs(
+        calculation.finalDamageBeforeRounding -
+        calculation.damageBeforeReduction * calculation.damageReductionMultiplier
+      ) < 1e-10,
+      'logged reduction multiplier must reproduce the final unrounded damage'
+    );
+    assert.strictEqual(calculation.recalculatedFinalDamage, calculation.finalDamage);
+    assert.strictEqual(calculation.matchesFinalDamage, true, 'logged full-power values must reproduce final damage');
+    assert.strictEqual(calculation.finalDamage, hit.damage.displayed, 'full-power final damage must not be overwritten later');
+  }
+  assert.strictEqual(buffedFullPowerHit.debugCalculation.damage.fullPowerCalculation.baseAttack, 100);
+  assert.strictEqual(buffedFullPowerHit.debugCalculation.damage.fullPowerCalculation.attackAfterExistingBuffs, 123);
+  assert.strictEqual(buffedFullPowerHit.debugCalculation.damage.fullPowerCalculation.attackBuffMultiplier, 1.23);
+  assert.strictEqual(
+    buffedFullPowerHit.damage.displayed,
+    Math.round(100 * 1.23 * 2.40 * 0.9 * buffedFullPowerHit.damage.variance),
+    'full power must use the existing attack buff before its display ratio and hidden modifier'
+  );
+  assert.strictEqual(
+    flameTailFullPowerHit.damage.displayed,
+    Math.round(
+      flameTailFullPowerHit.debugCalculation.damage.fullPowerCalculation.effectiveAttackUsed *
+      flameTailFullPowerHit.debugCalculation.damage.fullPowerCalculation.skillMultiplier *
+      0.9 *
+      flameTailFullPowerHit.damage.variance
+    ),
+    'Flametail Ptera full power must apply the shared hidden 0.9 modifier after sacrifice'
+  );
+  assert.strictEqual(
+    hardenedFullPowerHit.damage.displayed,
+    Math.round(100 * 2.40 * 0.9 * 0.65 * variance),
+    'harden must apply its separate 35% reduction to full power'
+  );
+  assert.strictEqual(
+    normalHit.damage.displayed,
+    Math.round(Math.round(100 * normalHit.damage.variance)),
+    'normal attack must retain its existing damage path without the hidden modifier'
+  );
+  assert.strictEqual(
+    quakeHit.damage.displayed,
+    Math.round(Math.round(100 * 1.50 * quakeHit.damage.variance)),
+    'other attack skills must retain their existing damage path without the hidden modifier'
+  );
+  assert(
+    !normalHit.debugCalculation.damage.steps.some(step => step.label === 'full_power_hidden_multiplier') &&
+    !quakeHit.debugCalculation.damage.steps.some(step => step.label === 'full_power_hidden_multiplier'),
+    'the hidden 0.9 modifier must not leak into normal attacks or other skills'
+  );
+}
+
+{
+  const dacentrurus = beast('test_dacentrurus_purify_waver', 'Dacentrurus Purify Waver', {
+    agi: 200, atk: 100, dur: 100, will: 1,
+  }, [
+    { name: '防御-浄化術', type: 'defense', rageCost: 0, effect: 'purify', param: 8 },
+    { name: '戦吼-動揺', type: 'battlecry', effect: 'waver', param: 0.30, param2: 0.10 },
+  ]);
+  dacentrurus.hp_start = 300;
+  const opponent = beast('test_dacentrurus_purify_opponent', 'Dacentrurus Purify Opponent', {
+    agi: 150, atk: 1, dur: 120, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(1202, () =>
+    app.simulateBattle6v6([dacentrurus], [opponent], true, { analysisMode: 'developer' })
+  );
+  const purifyHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'main' &&
+    event.target?.beastId === dacentrurus.id &&
+    event.defense?.skillId === 'purify'
+  );
+  const dacentrurusHits = result.analysisEvents.filter(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'main' &&
+    event.actor?.beastId === dacentrurus.id
+  );
+
+  assert(purifyHit, 'Dacentrurus must trigger purify after its first action');
+  assert.strictEqual(
+    purifyHit.defense.purify.dakentrulusAttackDownRemoved.remainingTurnsBefore,
+    2,
+    'purify must remove the two remaining attack-down turns'
+  );
+  assert.strictEqual(purifyHit.defense.purify.hpBefore, 300);
+  assert.strictEqual(purifyHit.defense.purify.hpAfter, 316, 'purify must heal for two removed stacks at 8 HP each');
+  assert.strictEqual(
+    purifyHit.defense.purify.dakentrulusAttackUpScheduledEffect.scheduled,
+    true,
+    'purify must preserve the later attack-up reservation'
+  );
+  assert.strictEqual(
+    purifyHit.defense.purify.dakentrulusAttackUpScheduledEffect.active,
+    false,
+    'attack-up must not start immediately when attack-down is purified'
+  );
+  assert.strictEqual(
+    purifyHit.defense.purify.dakentrulusAttackUpScheduledEffect.startsAtAttackCount,
+    3,
+    'attack-up must retain its original three-action start time'
+  );
+  assert.deepStrictEqual(
+    dacentrurusHits.slice(0, 4).map(event => event.damage.baseATK),
+    [90, 100, 100, 130],
+    'attack-down must end on purify while attack-up starts only at the original fourth attack'
+  );
+  assert.strictEqual(
+    dacentrurusHits[1].stateBefore.actor.statuses.dakentrulusAttackDownDebuff.active,
+    false,
+    'the attack-down state must remain cleansed after purify'
+  );
+  assert.strictEqual(
+    dacentrurusHits[1].stateBefore.actor.statuses.dakentrulusAttackUpScheduledEffect.active,
+    false,
+    'the first attack after purify must not receive the scheduled attack-up'
+  );
+  assert.strictEqual(
+    dacentrurusHits[3].stateBefore.actor.statuses.dakentrulusAttackUpScheduledEffect.active,
+    true,
+    'the scheduled attack-up must activate after three total attacks'
+  );
+}
+
+{
+  assert.strictEqual(app.ENABLE_QUAKE_HARDEN_LINK_BUG, false, 'quake harden hidden reservation bug must stay disabled');
+
+  const quakeUser = beast('test_quake_user', 'Quake User', { agi: 200, atk: 100, will: 999 }, [
+    { name: '攻撃-大地震撼', type: 'attack', rageCost: 0, effect: 'quake', param: 1.50, param2: 0.20 },
+    { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+  ]);
+  const hardenTarget = beast('test_harden_target', 'Harden Target', { agi: 100, atk: 1, will: 999 }, [
+    { name: '防御-硬化皮膚', type: 'defense', rageCost: 0, effect: 'harden', param: 0.35 },
+  ]);
+
+  const result = app.simulateBattle6v6([quakeUser], [hardenTarget], true);
+  const logText = result.log.map(row => row.msg).join('\n');
+
+  assert(logText.includes('大地震撼'), 'quake should execute');
+  assert(logText.includes('硬化皮膚'), 'defender harden should reduce quake');
+  assert(!logText.includes('quake_harden_link'), 'hidden harden reservation marker must never appear');
+  assert.strictEqual(result.teamA[0].hardenSource, null, 'quake user must not receive hidden harden reservation');
+}
+
+{
+  const uniqueOcrIds = app.getUniqueOcrCharIds();
+  for (const id of ['dacentrurus', 'thunder_bull', 'azure_stego', 'silver_frost_rex']) {
+    assert(uniqueOcrIds.includes(id), `${id} should appear in OCR options`);
+  }
+  const options = app.buildOcrCharOptions('dacentrurus');
+  assert(options.includes('value="dacentrurus" selected'), 'selected OCR beast should be marked selected');
+  assert.strictEqual(new Set(uniqueOcrIds).size, uniqueOcrIds.length, 'OCR options should not contain duplicate ids');
+}
+
+console.log('battle rules ok');
