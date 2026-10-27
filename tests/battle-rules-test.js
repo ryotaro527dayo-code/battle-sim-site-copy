@@ -1076,6 +1076,16 @@ const app = loadBattleSim();
   assert.strictEqual(purifyHit.defense.purify.removed, 2, 'Lv4 purify must remove exactly two debuff stacks');
   assert.strictEqual(purifyHit.defense.purify.hpAfter, 380, 'Lv4 purify must heal 40 HP for each of two removed stacks');
   assert.strictEqual(
+    purifyHit.defense.purify.healingTiming,
+    'before_incoming_damage',
+    'purify must report that healing occurs before incoming damage'
+  );
+  assert.strictEqual(
+    purifyHit.damage.hpBefore,
+    purifyHit.defense.purify.hpAfter,
+    'incoming damage must use the HP after purify healing'
+  );
+  assert.strictEqual(
     purifyHit.defense.purify.dakentrulusAttackUpScheduledEffect.scheduled,
     true,
     'purify must preserve the later attack-up reservation'
@@ -1170,6 +1180,85 @@ const app = loadBattleSim();
     'lacerate must consume one remaining attack per affected-beast attack'
   );
   assert(bleedEvents.every(event => event.actor.beastId === lacerateTarget.id), 'lacerate must trigger from the affected beast, not when another beast attacks it');
+}
+
+{
+  const silverFrost = beast('silver_frost_rex', 'Silver Frost Rex Purify', {
+    agi: 100, atk: 1, dur: 100, will: 1,
+  }, [
+    { name: '防御-浄化術', type: 'defense', rageCost: 0, effect: 'purify', param: 40 },
+    { name: '戦吼-神力', type: 'battlecry', effect: 'god_power', param: 0.12, param2: 0.08 },
+  ]);
+  silverFrost.hp_start = 100;
+  const opponent = beast('test_silver_frost_purify_opponent', 'Silver Frost Purify Opponent', {
+    agi: 200, atk: 50, dur: 100, will: 1,
+  }, []);
+
+  const result = app.withSeededRandom(8080, () =>
+    app.simulateBattle6v6([opponent], [silverFrost], true, { analysisMode: 'developer' })
+  );
+  const purifyHit = result.analysisEvents.find(event =>
+    event.eventType === 'hit' &&
+    event.hitType === 'main' &&
+    event.target?.beastId === silverFrost.id &&
+    event.defense?.skillId === 'purify'
+  );
+  const silverFrostState = result.teamB[0];
+
+  assert(purifyHit, 'Silver Frost Rex must trigger purify while God Power speed penalty is active');
+  assert.strictEqual(purifyHit.defense.purify.removed, 0, 'permanent God Power speed penalty must not be removed');
+  assert.strictEqual(purifyHit.defense.purify.godPowerSpeedDebuff, 0.08);
+  assert.strictEqual(purifyHit.defense.purify.godPowerDebuffPoints, 8);
+  assert.strictEqual(purifyHit.defense.purify.godPowerHeal, 320, 'God Power 8% speed penalty must heal 40 x 8');
+  assert.strictEqual(purifyHit.defense.purify.removedDebuffHeal, 0);
+  assert.strictEqual(purifyHit.defense.purify.hpBefore, 100);
+  assert.strictEqual(purifyHit.defense.purify.hpAfter, 400, 'God Power purify healing must respect max HP');
+  assert.strictEqual(purifyHit.damage.hpBefore, 400, 'God Power purify healing must occur before incoming damage');
+  assert.strictEqual(purifyHit.defense.purify.godPowerRetained, true);
+  assert(
+    silverFrostState.speedModifiers.some(modifier => modifier.id === 'warcry-god-power'),
+    'purify must retain the permanent God Power speed modifier'
+  );
+  assert.strictEqual(silverFrostState.getDisplayAGI(), 92, 'God Power speed penalty must remain after purify');
+}
+
+{
+  const lacerateSource = beast('test_combo_lacerate_source', 'Combo Lacerate Source', {
+    agi: 201, atk: 1, dur: 10000, will: 1,
+  }, [
+    { name: '攻撃-傷口裂傷', type: 'attack', rageCost: 0, effect: 'lacerate', param: 0.16 },
+  ]);
+  const comboTarget = beast('test_lacerated_combo_user', 'Lacerated Combo User', {
+    agi: 200, atk: 1, dur: 1000, will: 1,
+  }, [
+    { name: '攻撃-連撃', type: 'attack', rageCost: 0, effect: 'combo', param: 0.80 },
+  ]);
+
+  const result = app.withSeededRandom(1617, () =>
+    app.simulateBattle6v6([lacerateSource], [comboTarget], true, { analysisMode: 'developer' })
+  );
+  const comboHits = result.analysisEvents.filter(event =>
+    event.eventType === 'hit' &&
+    event.actor?.beastId === comboTarget.id &&
+    event.skillId === 'combo'
+  );
+  assert(comboHits.length >= 2, 'lacerated combo user must execute both combo hits');
+
+  const firstComboActionNo = comboHits[0].actionNo;
+  const lacerateTicks = result.analysisEvents.filter(event =>
+    event.eventType === 'status_damage' &&
+    event.skillId === 'lacerate' &&
+    event.actor?.beastId === comboTarget.id &&
+    event.actionNo === firstComboActionNo
+  );
+  assert.strictEqual(lacerateTicks.length, 2, 'combo must count as two attacks for lacerate');
+  assert.deepStrictEqual(lacerateTicks.map(event => event.hitIndex), [1, 2]);
+  assert.deepStrictEqual(lacerateTicks.map(event => event.damage.displayed), [640, 640]);
+  assert.deepStrictEqual(
+    lacerateTicks.map(event => event.debugCalculation.statusChanges[0].after),
+    [2, 1],
+    'each combo hit must consume one lacerate attack count'
+  );
 }
 
 {
