@@ -4,14 +4,17 @@ const { performance } = require('perf_hooks');
 const { loadBattleSim } = require('../tests/harness');
 
 const ROOT = path.resolve(__dirname, '..');
-const OUT_DIR = path.join(ROOT, 'search-results-30');
+const OUT_DIR = path.resolve(ROOT, process.env.BATTLE_RANKING_OUT_DIR || 'search-results-30');
 const DRY_RUN_PATH = path.join(OUT_DIR, 'dry-run.json');
 const CHECKPOINT_PATH = path.join(OUT_DIR, 'checkpoint.json');
 const FINAL_JSON_PATH = path.join(OUT_DIR, 'final-results.json');
 const FINAL_CSV_PATH = path.join(OUT_DIR, 'beast-ranking.csv');
 const FINAL_REPORT_PATH = path.join(OUT_DIR, 'final-report.md');
 const SEED_INFO_PATH = path.join(OUT_DIR, 'seed-info.json');
-const PREVIOUS_RESULTS_PATH = path.join(ROOT, 'search-results', 'final-results.json');
+const PREVIOUS_RESULTS_PATH = path.resolve(
+  ROOT,
+  process.env.BATTLE_RANKING_PREVIOUS_RESULTS || path.join('search-results', 'final-results.json')
+);
 const STAGE_RESULT_DIR = path.join(OUT_DIR, 'stages');
 
 const BASE_SEED = 5272026;
@@ -48,7 +51,7 @@ const DUPLICATE_IDS = Object.freeze([
   'k_tyrex',
 ]);
 
-const TARGET_IDS = Object.freeze([
+const BASE_TARGET_IDS = Object.freeze([
   'kong',
   'dark_rex',
   'ice_ptera',
@@ -81,12 +84,41 @@ const TARGET_IDS = Object.freeze([
   'silver_frost_rex',
 ]);
 
+const CANDIDATE_VARIANTS = Object.freeze({
+  kong_combo_lv1: {
+    baseId: 'kong',
+    name: '怪力コング（連撃Lv1）',
+    skillLevels: { combo: 1 },
+  },
+  flame_tail_ptera_full_power_lv1: {
+    baseId: 'flame_tail_ptera',
+    name: '焔尾プテラ（全力一撃Lv1）',
+    skillLevels: { full_power: 1 },
+  },
+  flame_tail_ptera_full_power_lv2: {
+    baseId: 'flame_tail_ptera',
+    name: '焔尾プテラ（全力一撃Lv2）',
+    skillLevels: { full_power: 2 },
+  },
+  flame_tail_ptera_full_power_lv3: {
+    baseId: 'flame_tail_ptera',
+    name: '焔尾プテラ（全力一撃Lv3）',
+    skillLevels: { full_power: 3 },
+  },
+});
+
+const TARGET_IDS = Object.freeze([
+  ...BASE_TARGET_IDS,
+  ...Object.keys(CANDIDATE_VARIANTS),
+]);
+
 const PREVIOUSLY_UNRANKED_IDS = Object.freeze([
   'triceratops',
   'flame_tail_ptera',
   'azure_stego',
   'thunder_bull',
   'dacentrurus',
+  ...Object.keys(CANDIDATE_VARIANTS),
 ]);
 
 const OPPONENT_POOLS = Object.freeze([
@@ -148,7 +180,7 @@ const STAGES = Object.freeze({
   stage3: { candidates: 800, trials: 200, checkpointEvery: 50 },
   stage4: { candidates: 80, trials: 2000, checkpointEvery: 5 },
   final: { candidates: 10, trials: 5000, checkpointEvery: 1 },
-  replacement: { candidates: 144, trials: 300, checkpointEvery: 12 },
+  replacement: { candidates: 168, trials: 300, checkpointEvery: 12 },
 });
 
 const PLANNED_BATTLES = Object.values(STAGES)
@@ -178,6 +210,21 @@ function withGenerator(generator, callback) {
 
 function generationRandom(seed, callback) {
   return withGenerator(createMulberry32(seed), callback);
+}
+
+function candidateBaseId(id) {
+  return CANDIDATE_VARIANTS[id]?.baseId || id;
+}
+
+function candidateName(app, id) {
+  if (CANDIDATE_VARIANTS[id]) return CANDIDATE_VARIANTS[id].name;
+  if (id === 'kong') return '怪力コング（連撃Lv4）';
+  if (id === 'flame_tail_ptera') return '焔尾プテラ（全力一撃Lv4）';
+  return app.CHARS[id]?.name || id;
+}
+
+function hasUniqueBaseIds(ids) {
+  return new Set(ids.map(candidateBaseId)).size === ids.length;
 }
 
 function comboKey(ids) {
@@ -234,12 +281,20 @@ function generateBalancedCombos(count) {
     while (combos.length < count && attempts < count * 250) {
       attempts++;
       const picked = [];
-      const pool = [...TARGET_IDS];
+      let pool = [...TARGET_IDS];
 
       for (let slot = 0; slot < 6; slot++) {
         let totalWeight = 0;
+        const variantCountsByBase = pool.reduce((counts, id) => {
+          const baseId = candidateBaseId(id);
+          counts[baseId] = (counts[baseId] || 0) + 1;
+          return counts;
+        }, {});
         const weights = pool.map(id => {
-          const weight = 1 / Math.pow(adoptionCounts[id] + 1, 1.35);
+          const baseVariantCount = variantCountsByBase[candidateBaseId(id)];
+          const weight =
+            Math.pow(baseVariantCount, 0.4) /
+            Math.pow(adoptionCounts[id] + 1, 2.5);
           totalWeight += weight;
           return weight;
         });
@@ -249,8 +304,10 @@ function generateBalancedCombos(count) {
           roll -= weights[pickIndex];
           if (roll <= 0) break;
         }
-        const [id] = pool.splice(Math.min(pickIndex, pool.length - 1), 1);
+        const id = pool[Math.min(pickIndex, pool.length - 1)];
         picked.push(id);
+        const baseId = candidateBaseId(id);
+        pool = pool.filter(candidateId => candidateBaseId(candidateId) !== baseId);
       }
 
       const key = comboKey(picked);
@@ -270,7 +327,15 @@ function generateBalancedCombos(count) {
 
 function randomComboFromBase(base, replaceCount) {
   const keep = shuffle(base).slice(0, 6 - replaceCount);
-  const replacements = shuffle(TARGET_IDS.filter(id => !keep.includes(id))).slice(0, replaceCount);
+  const usedBaseIds = new Set(keep.map(candidateBaseId));
+  const replacements = [];
+  for (const id of shuffle(TARGET_IDS)) {
+    const baseId = candidateBaseId(id);
+    if (usedBaseIds.has(baseId)) continue;
+    replacements.push(id);
+    usedBaseIds.add(baseId);
+    if (replacements.length === replaceCount) break;
+  }
   return [...keep, ...replacements].sort();
 }
 
@@ -308,20 +373,25 @@ function generateNeighborCombos(topResults, count) {
 function validateConfiguration(app) {
   const errors = [];
   const targetSet = new Set(TARGET_IDS);
+  const targetBaseSet = new Set(TARGET_IDS.map(candidateBaseId));
   const opponentIds = OPPONENT_POOLS.flatMap(pool => pool.ids);
   const opponentSet = new Set(opponentIds);
   const excludedIdSet = new Set(EXCLUDED_IDS);
   const duplicateIdSet = new Set(DUPLICATE_IDS);
 
-  if (TARGET_IDS.length !== 30 || targetSet.size !== 30) {
-    errors.push(`Target IDs must contain 30 unique entries, got ${TARGET_IDS.length}/${targetSet.size}`);
+  if (TARGET_IDS.length !== 34 || targetSet.size !== 34) {
+    errors.push(`Target IDs must contain 34 unique patterns, got ${TARGET_IDS.length}/${targetSet.size}`);
+  }
+  if (targetBaseSet.size !== 30) {
+    errors.push(`Target patterns must represent 30 unique beasts, got ${targetBaseSet.size}`);
   }
   for (const id of TARGET_IDS) {
-    if (!app.CHARS[id]) errors.push(`Unknown target ID: ${id}`);
-    if (excludedIdSet.has(id)) errors.push(`Excluded ID in targets: ${id}`);
-    if (duplicateIdSet.has(id)) errors.push(`Duplicate/legacy ID in targets: ${id}`);
-    if (EXCLUDED_NAMES.includes(app.CHARS[id]?.name)) {
-      errors.push(`Excluded beast name in targets: ${app.CHARS[id].name}`);
+    const baseId = candidateBaseId(id);
+    if (!app.CHARS[baseId]) errors.push(`Unknown target ID: ${id} (base: ${baseId})`);
+    if (excludedIdSet.has(baseId)) errors.push(`Excluded ID in targets: ${id}`);
+    if (duplicateIdSet.has(baseId)) errors.push(`Duplicate/legacy ID in targets: ${id}`);
+    if (EXCLUDED_NAMES.includes(app.CHARS[baseId]?.name)) {
+      errors.push(`Excluded beast name in targets: ${app.CHARS[baseId].name}`);
     }
   }
   if (OPPONENT_POOLS.length !== 5) errors.push(`Expected 5 opponent pools, got ${OPPONENT_POOLS.length}`);
@@ -334,33 +404,38 @@ function validateConfiguration(app) {
     errors.push(`Opponent pools must contain 30 unique slots, got ${opponentIds.length}/${opponentSet.size}`);
   }
   for (const id of opponentIds) {
-    if (!targetSet.has(id)) errors.push(`Opponent ID is outside target set: ${id}`);
+    if (!targetBaseSet.has(id)) errors.push(`Opponent ID is outside target base set: ${id}`);
     if (excludedIdSet.has(id)) errors.push(`Excluded ID in opponents: ${id}`);
     if (duplicateIdSet.has(id)) errors.push(`Duplicate/legacy ID in opponents: ${id}`);
   }
-  for (const id of TARGET_IDS) {
-    if (!opponentSet.has(id)) errors.push(`Target missing from opponent pools: ${id}`);
+  for (const id of BASE_TARGET_IDS) {
+    if (!opponentSet.has(id)) errors.push(`Base target missing from opponent pools: ${id}`);
   }
-  if (PLANNED_BATTLES !== 1513200) {
-    errors.push(`Planned battle count must be 1513200, got ${PLANNED_BATTLES}`);
+  if (PLANNED_BATTLES !== 1520400) {
+    errors.push(`Planned battle count must be 1520400, got ${PLANNED_BATTLES}`);
   }
   return errors;
 }
 
 function makeBeast(app, id) {
-  const beast = structuredClone(app.CHARS[id]);
+  const baseId = candidateBaseId(id);
+  const variant = CANDIDATE_VARIANTS[id] || null;
+  const beast = structuredClone(app.CHARS[baseId]);
   Object.assign(beast, DEFAULT_STATS);
   beast.skills = beast.skills.map(skill => {
     const copy = { ...skill };
-    const level4 =
-      app.SKILL_LV4_EFFECTS[id]?.[copy.effect] ||
-      app.SKILL_LEVEL_VALUE_TABLE[copy.effect]?.[4] ||
+    const level = variant?.skillLevels?.[copy.effect] || 4;
+    const values =
+      app.SKILL_LEVEL_BEAST_VALUE_TABLE?.[baseId]?.[copy.effect]?.[level] ||
+      (level === 4 ? app.SKILL_LV4_EFFECTS[baseId]?.[copy.effect] : null) ||
+      app.SKILL_LEVEL_VALUE_TABLE[copy.effect]?.[level] ||
       {};
-    Object.assign(copy, level4);
-    copy.level = 4;
+    Object.assign(copy, values);
+    copy.level = level;
     return copy;
   });
-  beast.skillLevels = Object.fromEntries(beast.skills.map(skill => [skill.effect, 4]));
+  beast.skillLevels = Object.fromEntries(beast.skills.map(skill => [skill.effect, skill.level]));
+  beast.rankingCandidateId = id;
   return beast;
 }
 
@@ -392,7 +467,7 @@ function finalizeTeamStats(app, stats) {
   stats.winRate = stats.trials ? stats.wins / stats.trials : 0;
   stats.avgAlive = stats.trials ? stats.aliveSum / stats.trials : 0;
   stats.avgHp = stats.trials ? stats.hpSum / stats.trials : 0;
-  stats.names = stats.ids.map(id => app.CHARS[id].name);
+  stats.names = stats.ids.map(id => candidateName(app, id));
   stats.byOpponent = stats.byOpponent.map(item => ({
     ...item,
     winRate: item.trials ? item.wins / item.trials : 0,
@@ -700,7 +775,7 @@ function adoption(app, results, limit) {
   selected.forEach(result => result.ids.forEach(id => counts[id]++));
   return TARGET_IDS.map(id => ({
     id,
-    name: app.CHARS[id].name,
+    name: candidateName(app, id),
     count: counts[id],
     rate: selected.length ? counts[id] / selected.length : 0,
   }));
@@ -721,7 +796,7 @@ function buildBeastRanking(app, finalTop20, stage4Results, stage3Results) {
     const top100Rate = map100.get(id).rate;
     return {
       id,
-      name: app.CHARS[id].name,
+      name: candidateName(app, id),
       score: top50Rate * 0.45 + top20Rate * 0.45 + top100Rate * 0.10,
       top20AdoptionCount: map20.get(id).count,
       top20AdoptionRate: top20Rate,
@@ -759,6 +834,20 @@ function buildBeastRanking(app, finalTop20, stage4Results, stage3Results) {
 function buildPreviousRanking(app) {
   if (!fs.existsSync(PREVIOUS_RESULTS_PATH)) return [];
   const previous = JSON.parse(fs.readFileSync(PREVIOUS_RESULTS_PATH, 'utf8'));
+  if (Array.isArray(previous.beastRanking)) {
+    return previous.beastRanking
+      .filter(item => TARGET_IDS.includes(item.id))
+      .map(item => ({
+        id: item.id,
+        name: candidateName(app, item.id),
+        score: item.score,
+        rank: item.rank,
+        top20AdoptionRate: item.top20AdoptionRate,
+        top50AdoptionRate: item.top50AdoptionRate,
+        top100AdoptionRate: item.top100AdoptionRate,
+        adoptedTop20AverageWinRate: item.adoptedTop20AverageWinRate,
+      }));
+  }
   const adoptionSets = previous.adoption || {};
   const maps = Object.fromEntries(
     ['top20', 'top50', 'top100'].map(key => [
@@ -776,7 +865,7 @@ function buildPreviousRanking(app) {
       const adoptedTop20 = previousTop20.filter(result => result.ids?.includes(id));
       return {
         id,
-        name: app.CHARS[id].name,
+        name: candidateName(app, id),
         score: top50Rate * 0.45 + top20Rate * 0.45 + top100Rate * 0.10,
         top20AdoptionRate: top20Rate,
         top50AdoptionRate: top50Rate,
@@ -822,7 +911,7 @@ function buildCombinationSynergy(app, results, size, limit = 100) {
       const ids = key.split('|');
       return {
         ids,
-        names: ids.map(id => app.CHARS[id].name),
+        names: ids.map(id => candidateName(app, id)),
         count,
         rate: selected.length ? count / selected.length : 0,
       };
@@ -831,25 +920,35 @@ function buildCombinationSynergy(app, results, size, limit = 100) {
     .slice(0, 20);
 }
 
-function createReplacementCombos(bestTeam) {
+function createReplacementCombos(topTeams) {
   const combos = [];
-  const outside = TARGET_IDS.filter(id => !bestTeam.ids.includes(id));
-  for (const addId of outside) {
-    for (let slot = 0; slot < bestTeam.ids.length; slot++) {
-      const ids = [...bestTeam.ids];
-      const removeId = ids[slot];
-      ids[slot] = addId;
-      combos.push({
-        ids: ids.sort(),
-        removeId,
-        addId,
-      });
+  const seen = new Set();
+
+  for (const sourceTeam of topTeams) {
+    for (let slot = 0; slot < sourceTeam.ids.length; slot++) {
+      for (const addId of TARGET_IDS) {
+        const ids = [...sourceTeam.ids];
+        const removeId = ids[slot];
+        ids[slot] = addId;
+        if (!hasUniqueBaseIds(ids)) continue;
+        const key = comboKey(ids);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        combos.push({
+          ids: ids.sort(),
+          removeId,
+          addId,
+          sourceKey: sourceTeam.key,
+          sourceWinRate: sourceTeam.winRate,
+        });
+        if (combos.length === STAGES.replacement.candidates) return combos;
+      }
     }
   }
-  if (combos.length !== STAGES.replacement.candidates) {
-    throw new Error(`Expected 144 replacement candidates, got ${combos.length}`);
-  }
-  return combos;
+
+  throw new Error(
+    `Expected ${STAGES.replacement.candidates} replacement candidates, got ${combos.length}`
+  );
 }
 
 function csvEscape(value) {
@@ -903,7 +1002,7 @@ function writeFinalOutputs(payload) {
   );
 
   const report = [
-    '# 猛獣育成優先度探索 30体版',
+    '# 猛獣育成優先度探索 30種類・34パターン修正版',
     '',
     `- 実行日時: ${payload.finishedAt}`,
     `- 予定戦闘数: ${payload.counters.plannedBattles.toLocaleString()}`,
@@ -993,11 +1092,11 @@ function runDryRun() {
   const adoptionValues = Object.values(generated.adoptionCounts);
   const averageAdoptions =
     adoptionValues.reduce((sum, value) => sum + value, 0) / adoptionValues.length;
-  const targetNames = TARGET_IDS.map(id => app.CHARS[id].name);
+  const targetNames = TARGET_IDS.map(id => candidateName(app, id));
   const opponentPools = OPPONENT_POOLS.map(pool => ({
     name: pool.name,
     ids: pool.ids,
-    names: pool.ids.map(id => app.CHARS[id].name),
+    names: pool.ids.map(id => candidateName(app, id)),
   }));
   const duplicateOrLegacyIds = [...TARGET_IDS, ...OPPONENT_POOLS.flatMap(pool => pool.ids)]
     .filter(id => DUPLICATE_IDS.includes(id));
@@ -1020,7 +1119,7 @@ function runDryRun() {
     status: 'dry-run-complete',
     fullSearchStarted: false,
     targetCount: TARGET_IDS.length,
-    targets: TARGET_IDS.map(id => ({ id, name: app.CHARS[id].name })),
+    targets: TARGET_IDS.map(id => ({ id, name: candidateName(app, id) })),
     excludedNames: EXCLUDED_NAMES,
     excludedIds: EXCLUDED_IDS,
     duplicateIds: DUPLICATE_IDS,
@@ -1039,10 +1138,10 @@ function runDryRun() {
       maxAdoptions: Math.max(...adoptionValues),
       spread: Math.max(...adoptionValues) - Math.min(...adoptionValues),
       adoptionCounts: Object.fromEntries(
-        TARGET_IDS.map(id => [app.CHARS[id].name, generated.adoptionCounts[id]])
+        TARGET_IDS.map(id => [candidateName(app, id), generated.adoptionCounts[id]])
       ),
       allTeamsHaveSixUniqueBeasts: generated.combos.every(
-        ids => ids.length === 6 && new Set(ids).size === 6
+        ids => ids.length === 6 && new Set(ids).size === 6 && hasUniqueBaseIds(ids)
       ),
       uniqueCandidateCount: new Set(generated.combos.map(comboKey)).size,
     },
@@ -1050,7 +1149,8 @@ function runDryRun() {
     plannedBattles: PLANNED_BATTLES,
     countersAtDryRun: createCounters(),
     fixedStats: DEFAULT_STATS,
-    skillLevel: 4,
+    defaultSkillLevel: 4,
+    candidateVariants: CANDIDATE_VARIANTS,
     orderPatterns: {
       candidate: ORDER_PATTERNS.length,
       opponent: OPPONENT_ORDER_PATTERNS.length,
@@ -1160,7 +1260,7 @@ function runFullSearch({ resume = false } = {}) {
     .map(result => finalByKey.get(result.key) || result)
     .sort(compareTeams);
 
-  const replacements = createReplacementCombos(finalTop20[0]);
+  const replacements = createReplacementCombos(finalTop20);
   const replacementStage = evaluateOrResumeStage(
     app,
     'replacement',
@@ -1175,10 +1275,10 @@ function runFullSearch({ resume = false } = {}) {
     return {
       ...result,
       removeId: source?.removeId || null,
-      removeName: source ? app.CHARS[source.removeId].name : null,
+      removeName: source ? candidateName(app, source.removeId) : null,
       addId: source?.addId || null,
-      addName: source ? app.CHARS[source.addId].name : null,
-      delta: result.winRate - finalTop20[0].winRate,
+      addName: source ? candidateName(app, source.addId) : null,
+      delta: result.winRate - (source?.sourceWinRate ?? finalTop20[0].winRate),
     };
   });
 
@@ -1232,7 +1332,8 @@ function runFullSearch({ resume = false } = {}) {
       excludedIds: EXCLUDED_IDS,
       duplicateIds: DUPLICATE_IDS,
       fixedStats: DEFAULT_STATS,
-      skillLevel: 4,
+      defaultSkillLevel: 4,
+      candidateVariants: CANDIDATE_VARIANTS,
       opponentPools: OPPONENT_POOLS,
       stages: STAGES,
       baseSeed: BASE_SEED,
@@ -1307,6 +1408,8 @@ module.exports = {
   EXCLUDED_NAMES,
   EXCLUDED_IDS,
   DUPLICATE_IDS,
+  BASE_TARGET_IDS,
+  CANDIDATE_VARIANTS,
   TARGET_IDS,
   PREVIOUSLY_UNRANKED_IDS,
   OPPONENT_POOLS,
@@ -1314,6 +1417,11 @@ module.exports = {
   OPPONENT_ORDER_PATTERNS,
   STAGES,
   PLANNED_BATTLES,
+  candidateBaseId,
+  candidateName,
+  hasUniqueBaseIds,
+  makeBeast,
+  createReplacementCombos,
   comboKey,
   stageSeed,
   stageSchedule,
