@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
-const RESULTS_DIR = path.join(ROOT, 'search-results-30');
+const RESULTS_DIR = path.resolve(ROOT, process.env.BATTLE_RANKING_OUT_DIR || 'search-results-30');
 const FINAL_RESULTS_PATH = path.join(RESULTS_DIR, 'final-results.json');
 const STAGE1_PATH = path.join(RESULTS_DIR, 'stages', 'stage1.json');
 const STAGE3_PATH = path.join(RESULTS_DIR, 'stages', 'stage3.json');
@@ -72,8 +72,8 @@ function formatRate(value) {
 
 function calculateExtendedRanking(finalResults, stage1, stage3) {
   const oldRanking = finalResults.beastRanking;
-  if (!Array.isArray(oldRanking) || oldRanking.length !== 30) {
-    throw new Error(`Expected 30 old ranking entries, got ${oldRanking?.length}`);
+  if (!Array.isArray(oldRanking) || oldRanking.length === 0) {
+    throw new Error(`Expected saved ranking entries, got ${oldRanking?.length}`);
   }
   const beastIds = oldRanking.map(item => item.id);
   const oldById = new Map(oldRanking.map(item => [item.id, item]));
@@ -215,7 +215,7 @@ function writeOutputs(result) {
   );
 
   const report = [
-    '# 猛獣育成優先度 30体版 拡張再集計',
+    '# 猛獣育成優先度 30種類・34パターン版 拡張再集計',
     '',
     `- 生成日時: ${new Date().toISOString()}`,
     '- 戦闘再実行: なし',
