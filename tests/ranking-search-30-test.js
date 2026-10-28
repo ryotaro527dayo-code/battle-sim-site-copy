@@ -5,8 +5,9 @@ const ranking = require('../ranking/beast-priority-search-30');
 const app = loadBattleSim();
 
 assert.deepStrictEqual(ranking.validateConfiguration(app), []);
-assert.strictEqual(ranking.TARGET_IDS.length, 30);
-assert.strictEqual(new Set(ranking.TARGET_IDS).size, 30);
+assert.strictEqual(ranking.TARGET_IDS.length, 34);
+assert.strictEqual(new Set(ranking.TARGET_IDS).size, 34);
+assert.strictEqual(new Set(ranking.TARGET_IDS.map(ranking.candidateBaseId)).size, 30);
 assert.strictEqual(ranking.OPPONENT_POOLS.length, 5);
 assert(ranking.OPPONENT_POOLS.every(pool => pool.ids.length === 6));
 
@@ -15,21 +16,54 @@ assert.strictEqual(opponentIds.length, 30);
 assert.strictEqual(new Set(opponentIds).size, 30);
 assert.deepStrictEqual(
   [...opponentIds].sort(),
-  [...ranking.TARGET_IDS].sort()
+  [...ranking.BASE_TARGET_IDS].sort()
 );
 
 const forbiddenIds = new Set([...ranking.EXCLUDED_IDS, ...ranking.DUPLICATE_IDS]);
-assert(ranking.TARGET_IDS.every(id => !forbiddenIds.has(id)));
+assert(ranking.TARGET_IDS.every(id => !forbiddenIds.has(ranking.candidateBaseId(id))));
 assert(opponentIds.every(id => !forbiddenIds.has(id)));
-assert(ranking.TARGET_IDS.every(id => !ranking.EXCLUDED_NAMES.includes(app.CHARS[id].name)));
+assert(ranking.TARGET_IDS.every(id =>
+  !ranking.EXCLUDED_NAMES.includes(app.CHARS[ranking.candidateBaseId(id)].name)
+));
 
 assert.strictEqual(ranking.STAGES.stage1.candidates, 50000);
 assert.strictEqual(ranking.STAGES.stage2.candidates, 30000);
 assert.strictEqual(ranking.STAGES.stage3.candidates, 800);
 assert.strictEqual(ranking.STAGES.stage4.candidates, 80);
 assert.strictEqual(ranking.STAGES.final.candidates, 10);
-assert.strictEqual(ranking.STAGES.replacement.candidates, 144);
-assert.strictEqual(ranking.PLANNED_BATTLES, 1513200);
+assert.strictEqual(ranking.STAGES.replacement.candidates, 168);
+assert.strictEqual(ranking.PLANNED_BATTLES, 1520400);
+
+{
+  const kongLv1 = ranking.makeBeast(app, 'kong_combo_lv1');
+  const kongLv4 = ranking.makeBeast(app, 'kong');
+  const kongLv1Combo = kongLv1.skills.find(skill => skill.effect === 'combo');
+  const kongLv4Combo = kongLv4.skills.find(skill => skill.effect === 'combo');
+  assert.deepStrictEqual(
+    { rageCost: kongLv1Combo.rageCost, param: kongLv1Combo.param, level: kongLv1Combo.level },
+    { rageCost: 20, param: 0.50, level: 1 }
+  );
+  assert.deepStrictEqual(
+    { rageCost: kongLv4Combo.rageCost, param: kongLv4Combo.param, level: kongLv4Combo.level },
+    { rageCost: 50, param: 0.80, level: 4 }
+  );
+
+  const expectedFullPower = {
+    flame_tail_ptera_full_power_lv1: { rageCost: 30, param: 1.60, level: 1 },
+    flame_tail_ptera_full_power_lv2: { rageCost: 40, param: 1.90, level: 2 },
+    flame_tail_ptera_full_power_lv3: { rageCost: 50, param: 2.10, level: 3 },
+    flame_tail_ptera: { rageCost: 60, param: 2.40, level: 4 },
+  };
+  for (const [id, expected] of Object.entries(expectedFullPower)) {
+    const beast = ranking.makeBeast(app, id);
+    const fullPower = beast.skills.find(skill => skill.effect === 'full_power');
+    assert.deepStrictEqual(
+      { rageCost: fullPower.rageCost, param: fullPower.param, level: fullPower.level },
+      expected,
+      id
+    );
+  }
+}
 
 for (const stageName of Object.keys(ranking.STAGES)) {
   const first = ranking.stageSchedule(stageName, 0);
@@ -59,7 +93,11 @@ for (let trial = 0; trial < 60; trial++) {
 const sample = ranking.generateBalancedCombos(3000);
 assert.strictEqual(sample.combos.length, 3000);
 assert.strictEqual(new Set(sample.combos.map(ranking.comboKey)).size, 3000);
-assert(sample.combos.every(ids => ids.length === 6 && new Set(ids).size === 6));
+assert(sample.combos.every(ids =>
+  ids.length === 6 &&
+  new Set(ids).size === 6 &&
+  ranking.hasUniqueBaseIds(ids)
+));
 const sampleCounts = Object.values(sample.adoptionCounts);
 assert(
   (Math.max(...sampleCounts) - Math.min(...sampleCounts)) /
@@ -67,15 +105,9 @@ assert(
   'balanced candidate generation must keep adoption counts close'
 );
 
-const fakeResults = Array.from({ length: 100 }, (_, index) => ({
-  ids: [
-    ranking.TARGET_IDS[index % 30],
-    ranking.TARGET_IDS[(index + 1) % 30],
-    ranking.TARGET_IDS[(index + 2) % 30],
-    ranking.TARGET_IDS[(index + 3) % 30],
-    ranking.TARGET_IDS[(index + 4) % 30],
-    ranking.TARGET_IDS[(index + 5) % 30],
-  ],
+const fakeResults = sample.combos.slice(0, 100).map((ids, index) => ({
+  ids,
+  key: ranking.comboKey(ids),
   winRate: 1 - index / 200,
   avgAlive: 1,
   avgHp: 100,
@@ -86,7 +118,7 @@ const beastRanking = ranking.buildBeastRanking(
   fakeResults.slice(0, 80),
   fakeResults
 );
-assert.strictEqual(beastRanking.length, 30);
+assert.strictEqual(beastRanking.length, 34);
 assert(beastRanking.every((item, index) => item.rank === index + 1));
 assert(beastRanking.every(item =>
   Number.isInteger(item.top20AdoptionCount) &&
@@ -101,6 +133,9 @@ assert(beastRanking.every(item =>
 ));
 assert(ranking.buildCombinationSynergy(app, fakeResults, 2).length > 0);
 assert(ranking.buildCombinationSynergy(app, fakeResults, 3).length > 0);
+const replacementCombos = ranking.createReplacementCombos(fakeResults.slice(0, 20));
+assert.strictEqual(replacementCombos.length, 168);
+assert(replacementCombos.every(item => ranking.hasUniqueBaseIds(item.ids)));
 
 {
   const counters = ranking.createCounters();
@@ -168,4 +203,4 @@ assert(ranking.buildCombinationSynergy(app, fakeResults, 3).length > 0);
   assert.strictEqual(counters.retries, 3);
 }
 
-console.log('ranking search 30 ok');
+console.log('ranking search 30 beasts / 34 patterns ok');
