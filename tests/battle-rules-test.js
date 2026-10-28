@@ -4,6 +4,21 @@ const { loadBattleSim, beast } = require('./harness');
 const app = loadBattleSim();
 
 {
+  const kongCombo = app.CHARS.kong.skills.find(skill => skill.effect === 'combo');
+  const otherCombo = app.CHARS.white_saber.skills.find(skill => skill.effect === 'combo');
+  assert.deepStrictEqual(
+    app.getSkillLevelValues('kong', kongCombo, 1),
+    { rageCost: 20, param: 0.50 },
+    'Kong combo Lv1 must cost 20 rage and use a 50% second-hit ratio'
+  );
+  assert.deepStrictEqual(
+    app.getSkillLevelValues('white_saber', otherCombo, 1),
+    { rageCost: 30, param: 0.60 },
+    'Kong-specific Lv1 values must not change other combo beasts'
+  );
+}
+
+{
   const attacker = beast('test_counter_killer', 'Counter Killer', { agi: 200, atk: 100, dur: 100, will: 67 }, []);
   const defender = beast('test_counter_dead', 'Counter Dead', { agi: 100, atk: 400, dur: 10, will: 66 }, [
     { name: '防御-反撃', type: 'defense', rageCost: 0, effect: 'counter', param: 0.25 },
