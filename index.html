@@ -2863,7 +2863,12 @@ const SKILL_LEVEL_VALUE_TABLE = {
   god_power: { 4: { param: 0.12, param2: 0.08 } },
   sacrifice: { 4: { param: 0.10, param2: 0.225 } },
   devour: { 4: { param: 0.25 } },
-  full_power: { 4: { rageCost: 60, param: 2.40 } },
+  full_power: {
+    1: { rageCost: 30, param: 1.60 },
+    2: { rageCost: 40, param: 1.90 },
+    3: { rageCost: 50, param: 2.10 },
+    4: { rageCost: 60, param: 2.40 },
+  },
   weak: { 4: { rageCost: 50, param: 0.25, param2: 2 } },
   toxic_frenzy: { 4: { rageCost: 30, param: 1.05, param2: 0.12, param3: 2 } },
   toxic_skin: { 4: { rageCost: 30, param: 0.20, param2: 4 } },
@@ -2871,6 +2876,14 @@ const SKILL_LEVEL_VALUE_TABLE = {
   wild_weak: { 4: { param: 0.05 } },
   heavy_wound: { 4: { param: 0.10 } },
   attack_talent: { 4: { param: 4 } },
+};
+
+const SKILL_LEVEL_BEAST_VALUE_TABLE = {
+  kong: {
+    combo: {
+      1: { rageCost: 20, param: 0.50 },
+    },
+  },
 };
 
 const SKILL_LV4_EFFECTS = {
@@ -4112,6 +4125,8 @@ async function handleOcrBatchUpload(event) {
 }
 
 function getSkillLevelValues(charId, skill, level) {
+  const beastTable = SKILL_LEVEL_BEAST_VALUE_TABLE[charId]?.[skill.effect]?.[level];
+  if (beastTable) return beastTable;
   if (level === 4 && SKILL_LV4_EFFECTS[charId]?.[skill.effect]) {
     return SKILL_LV4_EFFECTS[charId][skill.effect];
   }
